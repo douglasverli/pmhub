@@ -1,0 +1,1276 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Project Management Hub</title>
+<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet"/>
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+html,body,#root{height:100%;overflow:hidden}
+body{font-family:'Plus Jakarta Sans',system-ui,sans-serif;background:#EEF2FF}
+::-webkit-scrollbar{width:6px;height:6px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:#CBD5E1;border-radius:3px}
+::-webkit-scrollbar-thumb:hover{background:#94A3B8}
+.drag-over-top{border-top:2.5px solid #6366F1!important}
+.drag-over-bot{border-bottom:2.5px solid #6366F1!important}
+@media print{.no-print{display:none!important}body{background:white}}
+input[type=color]{padding:1px;border:1px solid #E2E8F0;border-radius:4px;cursor:pointer;background:white}
+</style>
+</head>
+<body><div id="root"></div>
+<script type="text/babel">
+const {useState,useEffect,useRef,useMemo,useContext,createContext,useCallback}=React;
+
+/* ═══ CONTEXT ═══════════════════════════════════════════ */
+const Ctx=createContext(null);
+const useCx=()=>useContext(Ctx);
+
+/* ═══ CONSTANTS ═════════════════════════════════════════ */
+const AC="#6366F1";
+const STATUS_CFG={
+  "Not Started":{bg:"#F1F5F9",tx:"#475569",dot:"#94A3B8"},
+  "In Progress": {bg:"#DBEAFE",tx:"#1D4ED8",dot:"#3B82F6"},
+  "Completed":   {bg:"#DCFCE7",tx:"#15803D",dot:"#22C55E"},
+  "On Hold":     {bg:"#FEF9C3",tx:"#854D0E",dot:"#CA8A04"},
+  "Blocked":     {bg:"#FFE4E6",tx:"#BE123C",dot:"#F43F5E"},
+};
+const PRIO_C={Low:"#22C55E",Medium:"#F97316",High:"#EF4444",Critical:"#A855F7"};
+const GANTT_C={"Not Started":"#94A3B8","In Progress":"#3B82F6","Completed":"#22C55E","On Hold":"#CA8A04","Blocked":"#F43F5E"};
+const MONTHS=["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+const IDX_KEY="pmhub2_idx",ACTIVE_KEY="pmhub2_active",USERS_KEY="pmhub2_users",CU_KEY="pmhub2_cu";
+const PK=id=>`pmhub2_p_${id}`;
+
+/* ═══ HELPERS ═══════════════════════════════════════════ */
+const fmtD=d=>d?new Date(d).toLocaleDateString("en-US",{month:"short",day:"numeric"}):"–";
+const fmtD2=d=>d?new Date(d).toLocaleDateString("en-US",{month:"short",day:"numeric",year:"numeric"}):"–";
+const fmtC=n=>"$"+Number(n||0).toLocaleString("en-US");
+const daysBetween=(a,b)=>Math.max(1,Math.round((new Date(b)-new Date(a))/86400000));
+const uid=()=>"i"+Date.now().toString(36)+Math.random().toString(36).substr(2,4);
+const today=new Date().toISOString().slice(0,10);
+const loadLS=k=>{try{const r=localStorage.getItem(k);return r?JSON.parse(r):null}catch{return null}};
+const saveLS=(k,v)=>{try{localStorage.setItem(k,JSON.stringify(v))}catch{}};
+
+/* ═══ BACKEND API HELPERS ═══════════════════════════════ */
+const apiGet=async url=>{const r=await fetch(url);if(!r.ok)throw new Error(`GET ${url} failed`);return r.json();};
+const apiSend=async (url,method,body)=>{const r=await fetch(url,{method,headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});if(!r.ok)throw new Error(`${method} ${url} failed`);return r.json();};
+
+
+/* ═══ DEFAULT DATA ══════════════════════════════════════ */
+const DEF_COLS=[
+  {id:"wbs",   field:"wbs",   label:"WBS",       width:68, type:"text",    visible:true, align:"left"},
+  {id:"name",  field:"name",  label:"Task Name",  width:240,type:"text",    visible:true, align:"left"},
+  {id:"asn",   field:"asn",   label:"Assignee",   width:130,type:"text",    visible:true, align:"left"},
+  {id:"start", field:"start", label:"Start",      width:96, type:"date",    visible:true, align:"left"},
+  {id:"end",   field:"end",   label:"Finish",     width:96, type:"date",    visible:true, align:"left"},
+  {id:"dur",   field:"dur",   label:"Days",       width:58, type:"number",  visible:true, align:"center"},
+  {id:"pred",  field:"pred",  label:"Predecessors",width:110,type:"text",   visible:true, align:"left"},
+  {id:"prog",  field:"prog",  label:"% Done",     width:110,type:"progress",visible:true, align:"left"},
+  {id:"status",field:"status",label:"Status",     width:130,type:"status",  visible:true, align:"left"},
+  {id:"prio",  field:"prio",  label:"Priority",   width:98, type:"priority",visible:true, align:"left"},
+  {id:"budget",field:"budget",label:"Budget ($)", width:100,type:"currency", visible:true, align:"right"},
+  {id:"spent", field:"spent", label:"Actual ($)", width:90, type:"currency", visible:true, align:"right"},
+  {id:"notes", field:"notes", label:"Notes",      width:180,type:"text",    visible:true, align:"left"},
+];
+const DEF_TASKS=[
+  {id:"1", wbs:"1",   name:"Phase 1: Project Initiation",   level:0,par:true, pid:null,start:"2025-05-01",end:"2025-05-15",dur:14,prog:100,status:"Completed",  prio:"High",    asn:"Douglas F.",budget:10000,spent:9500, pred:"",   notes:"Kickoff & charter",desc:"Initial project setup and stakeholder alignment.",subtasks:[],comments:[]},
+  {id:"2", wbs:"1.1", name:"Project Charter",               level:1,par:false,pid:"1", start:"2025-05-01",end:"2025-05-05",dur:4, prog:100,status:"Completed",  prio:"High",    asn:"Douglas F.",budget:2000, spent:1800, pred:"",   notes:"",desc:"",subtasks:[],comments:[]},
+  {id:"3", wbs:"1.2", name:"Stakeholder Register",          level:1,par:false,pid:"1", start:"2025-05-05",end:"2025-05-10",dur:5, prog:100,status:"Completed",  prio:"Medium",  asn:"AV",        budget:3000, spent:2900, pred:"2",  notes:"",desc:"",subtasks:[],comments:[]},
+  {id:"4", wbs:"1.3", name:"Kick-off Meeting",              level:1,par:false,pid:"1", start:"2025-05-12",end:"2025-05-15",dur:3, prog:100,status:"Completed",  prio:"High",    asn:"Douglas F.",budget:5000, spent:4800, pred:"3",  notes:"",desc:"",subtasks:[],comments:[]},
+  {id:"5", wbs:"2",   name:"Phase 2: Planning",             level:0,par:true, pid:null,start:"2025-05-16",end:"2025-06-30",dur:45,prog:60, status:"In Progress",prio:"High",    asn:"Douglas F.",budget:25000,spent:15000,pred:"1",  notes:"",desc:"",subtasks:[],comments:[]},
+  {id:"6", wbs:"2.1", name:"Requirements Gathering",        level:1,par:false,pid:"5", start:"2025-05-16",end:"2025-05-30",dur:14,prog:100,status:"Completed",  prio:"High",    asn:"Kristin",   budget:5000, spent:4900, pred:"4",  notes:"",desc:"",subtasks:[],comments:[]},
+  {id:"7", wbs:"2.2", name:"Technical Architecture",        level:1,par:false,pid:"5", start:"2025-05-20",end:"2025-06-10",dur:21,prog:85, status:"In Progress",prio:"Critical",asn:"Isaac",     budget:8000, spent:6800, pred:"6",  notes:"",desc:"",subtasks:[],comments:[]},
+  {id:"8", wbs:"2.3", name:"Resource & Budget Planning",    level:1,par:false,pid:"5", start:"2025-05-26",end:"2025-06-15",dur:20,prog:50, status:"In Progress",prio:"Medium",  asn:"Douglas F.",budget:4000, spent:2000, pred:"",   notes:"",desc:"",subtasks:[],comments:[]},
+  {id:"9", wbs:"2.4", name:"Risk Assessment",               level:1,par:false,pid:"5", start:"2025-06-01",end:"2025-06-30",dur:29,prog:25, status:"In Progress",prio:"High",    asn:"AV",        budget:3000, spent:750,  pred:"7",  notes:"",desc:"",subtasks:[],comments:[]},
+  {id:"10",wbs:"3",   name:"Phase 3: Execution",            level:0,par:true, pid:null,start:"2025-07-01",end:"2025-09-15",dur:76,prog:5,  status:"In Progress",prio:"Critical",asn:"Isaac",     budget:80000,spent:4000, pred:"5",  notes:"Main dev",desc:"",subtasks:[],comments:[]},
+  {id:"11",wbs:"3.1", name:"Frontend Development",          level:1,par:false,pid:"10",start:"2025-07-01",end:"2025-08-15",dur:45,prog:10, status:"In Progress",prio:"High",    asn:"Isaac",     budget:30000,spent:3000, pred:"9",  notes:"",desc:"",subtasks:[],comments:[]},
+  {id:"12",wbs:"3.2", name:"Backend Development",           level:1,par:false,pid:"10",start:"2025-07-05",end:"2025-08-31",dur:57,prog:5,  status:"In Progress",prio:"High",    asn:"Isaac",     budget:35000,spent:1750, pred:"9",  notes:"",desc:"",subtasks:[],comments:[]},
+  {id:"13",wbs:"3.3", name:"QA & Integration Testing",      level:1,par:false,pid:"10",start:"2025-08-15",end:"2025-09-15",dur:31,prog:0,  status:"Not Started",prio:"High",    asn:"Kristin",   budget:15000,spent:0,    pred:"11,12",notes:"",desc:"",subtasks:[],comments:[]},
+  {id:"14",wbs:"4",   name:"Phase 4: Deployment & Closure", level:0,par:true, pid:null,start:"2025-09-16",end:"2025-10-15",dur:29,prog:0,  status:"Not Started",prio:"Medium",  asn:"Douglas F.",budget:10000,spent:0,    pred:"10", notes:"",desc:"",subtasks:[],comments:[]},
+  {id:"15",wbs:"4.1", name:"Production Deployment",         level:1,par:false,pid:"14",start:"2025-09-16",end:"2025-09-25",dur:9, prog:0,  status:"Not Started",prio:"Critical",asn:"Isaac",     budget:5000, spent:0,    pred:"13", notes:"",desc:"",subtasks:[],comments:[]},
+  {id:"16",wbs:"4.2", name:"Project Closure Report",        level:1,par:false,pid:"14",start:"2025-09-26",end:"2025-10-15",dur:19,prog:0,  status:"Not Started",prio:"Medium",  asn:"Douglas F.",budget:5000, spent:0,    pred:"15", notes:"",desc:"",subtasks:[],comments:[]},
+];
+const DEF_USERS=[{id:"admin",name:"Douglas F.",email:"admin@pmhub.com",role:"Admin",pwd:"admin123",color:"#6366F1",initials:"DF"}];
+
+/* ═══ SMALL COMPONENTS (top-level) ═════════════════════ */
+function SBadge({s}){const c=STATUS_CFG[s]||STATUS_CFG["Not Started"];return<span style={{display:"inline-flex",alignItems:"center",gap:5,background:c.bg,borderRadius:999,padding:"2px 9px",whiteSpace:"nowrap",fontSize:11,fontWeight:500,color:c.tx}}><span style={{width:6,height:6,borderRadius:"50%",background:c.dot,flexShrink:0,display:"inline-block"}}/>{s}</span>}
+function PBadge({p}){return<span style={{display:"inline-flex",alignItems:"center",gap:4}}><span style={{width:8,height:8,borderRadius:"50%",background:PRIO_C[p]||"#94A3B8",flexShrink:0,display:"inline-block"}}/><span style={{fontSize:12,fontWeight:500}}>{p}</span></span>}
+function PBar({v}){return<div style={{display:"flex",alignItems:"center",gap:6}}><div style={{flex:1,height:5,background:"#E2E8F0",borderRadius:999,overflow:"hidden",minWidth:50}}><div style={{width:v+"%",height:"100%",background:v===100?"#22C55E":AC,borderRadius:999,transition:"width .3s"}}/></div><span style={{fontSize:11,fontWeight:600,color:"#64748B",minWidth:28}}>{v}%</span></div>}
+function Ava({name,size=22}){if(!name)return null;const i=name.split(" ").map(w=>w[0]).join("").substr(0,2).toUpperCase();const pal=["#6366F1","#3B82F6","#10B981","#F59E0B","#EF4444","#8B5CF6","#EC4899"];return<span style={{width:size,height:size,borderRadius:"50%",background:pal[name.charCodeAt(0)%pal.length],color:"white",display:"inline-flex",alignItems:"center",justifyContent:"center",fontSize:size*0.42,fontWeight:600,flexShrink:0}}>{i}</span>}
+function Divider(){return<div style={{height:1,background:"rgba(255,255,255,0.08)",margin:"6px 8px"}}/>}
+
+/* ═══ EDIT INPUT (top-level — critical for focus fix) ════ */
+function EditInput({f,type,opts,val,setVal,commit,cancel}){
+  const r=useRef(null);
+  useEffect(()=>{if(r.current){r.current.focus();try{r.current.select()}catch{}};},[]);
+  const ok=e=>{if(e.key==="Enter"&&type!=="textarea"){e.preventDefault();commit();}if(e.key==="Escape"){e.preventDefault();cancel();}};
+  const bs={border:"none",outline:"none",background:"transparent",fontFamily:f==="wbs"?"'JetBrains Mono',monospace":"inherit",fontSize:13,color:"inherit",width:"100%",padding:0};
+  if(type==="select")return<select ref={r} value={val} onChange={e=>setVal(e.target.value)} onBlur={commit} onKeyDown={ok} style={{...bs,cursor:"pointer"}}>{opts.map(o=><option key={o}>{o}</option>)}</select>;
+  if(type==="date")return<input ref={r} type="date" value={val} onChange={e=>setVal(e.target.value)} onBlur={commit} onKeyDown={ok} style={{...bs,fontSize:12}}/>;
+  return<input ref={r} type={type||"text"} value={val} onChange={e=>setVal(e.target.value)} onBlur={commit} onKeyDown={ok} style={{...bs,textAlign:["budget","spent","dur"].includes(f)?"center":"left"}}/>;
+}
+
+/* ═══ TASK CARD (Jira-style right panel) ════════════════ */
+function TaskCard(){
+  const {tasks,setTasks,cardId,setCardId,users}=useCx();
+  const t=tasks.find(x=>x.id===cardId);
+  const [comment,setComment]=useState("");
+  if(!t)return null;
+  const upd=(f,v)=>setTasks(p=>p.map(x=>x.id===t.id?{...x,[f]:v}:x));
+  const addSub=()=>{const s=prompt("Subtask name:");if(s)upd("subtasks",[...(t.subtasks||[]),{id:uid(),text:s,done:false}])};
+  const toggleSub=sid=>upd("subtasks",(t.subtasks||[]).map(s=>s.id===sid?{...s,done:!s.done}:s));
+  const addComment=()=>{if(!comment.trim())return;upd("comments",[...(t.comments||[]),{id:uid(),text:comment,ts:new Date().toLocaleString(),user:"You"}]);setComment("")};
+  const statOpts=Object.keys(STATUS_CFG),prioOpts=Object.keys(PRIO_C);
+  const sel={border:"1px solid #E2E8F0",borderRadius:7,padding:"5px 8px",fontSize:12,fontFamily:"inherit",outline:"none",background:"white",cursor:"pointer",width:"100%"};
+  return(
+    <div style={{position:"fixed",top:0,right:0,width:420,height:"100vh",background:"white",borderLeft:"1px solid #E2E8F0",zIndex:500,display:"flex",flexDirection:"column",boxShadow:"-8px 0 40px rgba(0,0,0,0.12)"}}>
+      <div style={{padding:"14px 16px",borderBottom:"1px solid #E2E8F0",display:"flex",justifyContent:"space-between",alignItems:"center",background:"#F8FAFF",flexShrink:0}}>
+        <div style={{display:"flex",alignItems:"center",gap:8}}>
+          <span style={{fontFamily:"'JetBrains Mono',monospace",fontSize:11,color:"#94A3B8",fontWeight:600}}>{t.wbs}</span>
+          <SBadge s={t.status}/>
+        </div>
+        <button onClick={()=>setCardId(null)} style={{border:"none",background:"#F1F5F9",cursor:"pointer",width:28,height:28,borderRadius:6,fontSize:16,display:"flex",alignItems:"center",justifyContent:"center",color:"#64748B"}}>✕</button>
+      </div>
+      <div style={{flex:1,overflow:"auto",padding:"16px"}}>
+        <textarea value={t.name} onChange={e=>upd("name",e.target.value)} style={{width:"100%",border:"none",outline:"none",fontSize:17,fontWeight:700,color:"#1E293B",resize:"none",fontFamily:"inherit",background:"transparent",lineHeight:1.3,marginBottom:12}} rows={2}/>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:14}}>
+          {[["Status","status","select",statOpts],["Priority","prio","select",prioOpts],["Assignee","asn","text",null],["Start","start","date",null],["Finish","end","date",null],["% Done","prog","number",null],["Budget ($)","budget","number",null],["Actual ($)","spent","number",null],["Predecessors","pred","text",null]].map(([lbl,fld,typ,opts])=>(
+            <div key={fld} style={{gridColumn:fld==="name"||fld==="pred"||fld==="notes"?"1/-1":"auto"}}>
+              <div style={{fontSize:10,fontWeight:700,color:"#94A3B8",textTransform:"uppercase",letterSpacing:"0.06em",marginBottom:4}}>{lbl}</div>
+              {typ==="select"?<select value={t[fld]||""} onChange={e=>upd(fld,e.target.value)} style={sel}>{opts.map(o=><option key={o}>{o}</option>)}</select>
+               :typ==="date"?<input type="date" value={t[fld]||""} onChange={e=>upd(fld,e.target.value)} style={sel}/>
+               :<input type={typ} value={t[fld]||""} onChange={e=>upd(fld,e.target.value)} style={sel}/>}
+            </div>
+          ))}
+        </div>
+        <div style={{marginBottom:14}}>
+          <div style={{fontSize:10,fontWeight:700,color:"#94A3B8",textTransform:"uppercase",letterSpacing:"0.06em",marginBottom:6}}>Owners</div>
+          <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+            {users.map(u=>{
+              const selected=(t.owners||t.assignees||[]).includes(u.id)||t.ownerId===u.id||t.asn===u.name;
+              return <button key={u.id} onClick={()=>{const current=t.owners||t.assignees||[];const next=selected?current.filter(id=>id!==u.id):[...current,u.id];upd("owners",next);upd("assignees",next);if(next.length)upd("asn",users.filter(x=>next.includes(x.id)).map(x=>x.name).join(", "));}} style={{border:selected?`1px solid ${AC}`:"1px solid #E2E8F0",background:selected?"#EEF2FF":"white",color:selected?AC:"#64748B",borderRadius:999,padding:"5px 10px",fontSize:12,fontWeight:600,cursor:"pointer",fontFamily:"inherit"}}>{u.name}</button>
+            })}
+          </div>
+        </div>
+        <div style={{marginBottom:14}}>
+          <div style={{fontSize:10,fontWeight:700,color:"#94A3B8",textTransform:"uppercase",letterSpacing:"0.06em",marginBottom:6}}>Description</div>
+          <textarea value={t.desc||""} onChange={e=>upd("desc",e.target.value)} placeholder="Add a description…" rows={3} style={{width:"100%",border:"1px solid #E2E8F0",borderRadius:8,padding:"8px 10px",fontSize:13,fontFamily:"inherit",outline:"none",resize:"vertical",color:"#374151"}}/>
+        </div>
+        <div style={{marginBottom:14}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
+            <div style={{fontSize:10,fontWeight:700,color:"#94A3B8",textTransform:"uppercase",letterSpacing:"0.06em"}}>Subtasks ({(t.subtasks||[]).length})</div>
+            <button onClick={addSub} style={{fontSize:11,color:AC,border:"none",background:"none",cursor:"pointer",fontWeight:600}}>+ Add</button>
+          </div>
+          {(t.subtasks||[]).map(s=>(
+            <div key={s.id} style={{display:"flex",alignItems:"center",gap:8,padding:"6px 8px",borderRadius:6,background:s.done?"#F0FDF4":"#F8FAFF",marginBottom:4}}>
+              <input type="checkbox" checked={s.done} onChange={()=>toggleSub(s.id)} style={{cursor:"pointer"}}/>
+              <span style={{fontSize:13,flex:1,textDecoration:s.done?"line-through":"none",color:s.done?"#94A3B8":"#374151"}}>{s.text}</span>
+              <button onClick={()=>upd("subtasks",(t.subtasks||[]).filter(x=>x.id!==s.id))} style={{border:"none",background:"none",cursor:"pointer",color:"#F87171",fontSize:12}}>✕</button>
+            </div>
+          ))}
+        </div>
+        <div>
+          <div style={{fontSize:10,fontWeight:700,color:"#94A3B8",textTransform:"uppercase",letterSpacing:"0.06em",marginBottom:8}}>Activity</div>
+          {(t.comments||[]).map(c=>(
+            <div key={c.id} style={{display:"flex",gap:8,marginBottom:10}}>
+              <Ava name={c.user} size={26}/>
+              <div><div style={{fontSize:11,fontWeight:600,color:"#1E293B"}}>{c.user} <span style={{color:"#94A3B8",fontWeight:400}}>{c.ts}</span></div><div style={{fontSize:13,color:"#374151",marginTop:2}}>{c.text}</div></div>
+            </div>
+          ))}
+          <div style={{display:"flex",gap:8,marginTop:8}}>
+            <textarea value={comment} onChange={e=>setComment(e.target.value)} placeholder="Add a comment…" rows={2} style={{flex:1,border:"1px solid #E2E8F0",borderRadius:8,padding:"7px 10px",fontSize:13,fontFamily:"inherit",outline:"none",resize:"none"}}/>
+            <button onClick={addComment} style={{background:AC,color:"white",border:"none",borderRadius:8,padding:"0 14px",cursor:"pointer",fontWeight:600,fontSize:13,alignSelf:"flex-end",height:36}}>Send</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ═══ COLUMN MANAGER ════════════════════════════════════ */
+function ColMgr(){
+  const {columns,setColumns,setShowColMgr}=useCx();
+  const [cols,setCols]=useState(columns.map(c=>({...c})));
+  const [newLabel,setNewLabel]=useState(""),newType=useRef("text");
+  const save=()=>{setColumns(cols);setShowColMgr(false)};
+  const addCol=()=>{if(!newLabel.trim())return;setCols(p=>[...p,{id:uid(),field:"custom_"+uid(),label:newLabel,width:120,type:newType.current,visible:true,align:"left",custom:true}]);setNewLabel("")};
+  const toggle=id=>setCols(p=>p.map(c=>c.id===id?{...c,visible:!c.visible}:c));
+  const setLabel=(id,v)=>setCols(p=>p.map(c=>c.id===id?{...c,label:v}:c));
+  const setWidth=(id,v)=>setCols(p=>p.map(c=>c.id===id?{...c,width:Number(v)||c.width}:c));
+  const del=id=>setCols(p=>p.filter(c=>c.id!==id||!c.custom));
+  return(
+    <div style={{position:"fixed",inset:0,background:"rgba(15,22,41,0.6)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:400}}>
+      <div style={{background:"white",borderRadius:16,width:580,maxHeight:"85vh",overflow:"hidden",display:"flex",flexDirection:"column",boxShadow:"0 24px 80px rgba(0,0,0,0.25)"}}>
+        <div style={{padding:"18px 22px",borderBottom:"1px solid #E2E8F0",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+          <h3 style={{margin:0,fontSize:17,fontWeight:700,color:"#1E293B"}}>Manage Columns</h3>
+          <button onClick={()=>setShowColMgr(false)} style={{border:"none",background:"#F1F5F9",cursor:"pointer",width:30,height:30,borderRadius:7,fontSize:16}}>✕</button>
+        </div>
+        <div style={{overflow:"auto",flex:1,padding:"16px 22px"}}>
+          <div style={{fontSize:12,color:"#94A3B8",marginBottom:10}}>Toggle visibility, rename, or resize columns. Custom columns can be deleted.</div>
+          {cols.map(c=>(
+            <div key={c.id} style={{display:"flex",alignItems:"center",gap:10,padding:"8px 10px",borderRadius:8,background:c.visible?"#F8FAFF":"#F1F5F9",marginBottom:6,border:"1px solid #E2E8F0"}}>
+              <input type="checkbox" checked={c.visible} onChange={()=>toggle(c.id)} style={{cursor:"pointer",flexShrink:0}}/>
+              <input value={c.label} onChange={e=>setLabel(c.id,e.target.value)} style={{flex:1,border:"1px solid #E2E8F0",borderRadius:6,padding:"4px 8px",fontSize:13,fontFamily:"inherit",outline:"none"}}/>
+              <div style={{display:"flex",alignItems:"center",gap:4}}>
+                <span style={{fontSize:11,color:"#94A3B8"}}>w:</span>
+                <input type="number" value={c.width} onChange={e=>setWidth(c.id,e.target.value)} style={{width:58,border:"1px solid #E2E8F0",borderRadius:6,padding:"4px 6px",fontSize:12,fontFamily:"inherit",outline:"none",textAlign:"center"}}/>
+              </div>
+              <span style={{fontSize:10,color:"#94A3B8",minWidth:48}}>{c.type}</span>
+              {c.custom?<button onClick={()=>del(c.id)} style={{border:"none",background:"none",cursor:"pointer",color:"#F87171",fontSize:14}}>Delete</button>:<span style={{width:20}}/>}
+            </div>
+          ))}
+          <div style={{marginTop:16,padding:"12px",background:"#F0F4FF",borderRadius:10,border:"1px dashed #C7D2FE"}}>
+            <div style={{fontSize:11,fontWeight:600,color:AC,marginBottom:8}}>Add Custom Column</div>
+            <div style={{display:"flex",gap:8}}>
+              <input value={newLabel} onChange={e=>setNewLabel(e.target.value)} placeholder="Column name" style={{flex:1,border:"1px solid #E2E8F0",borderRadius:7,padding:"7px 10px",fontSize:13,fontFamily:"inherit",outline:"none"}}/>
+              <select onChange={e=>newType.current=e.target.value} style={{border:"1px solid #E2E8F0",borderRadius:7,padding:"7px 8px",fontSize:12,fontFamily:"inherit",outline:"none",cursor:"pointer"}}>
+                <option value="text">Text</option><option value="number">Number</option><option value="date">Date</option><option value="currency">Currency</option>
+              </select>
+              <button onClick={addCol} style={{background:AC,color:"white",border:"none",borderRadius:7,padding:"7px 16px",fontSize:13,fontWeight:600,cursor:"pointer"}}>Add</button>
+            </div>
+          </div>
+        </div>
+        <div style={{padding:"12px 22px",borderTop:"1px solid #E2E8F0",display:"flex",justifyContent:"flex-end",gap:8}}>
+          <button onClick={()=>setShowColMgr(false)} style={{border:"1px solid #E2E8F0",borderRadius:8,padding:"8px 18px",fontSize:13,cursor:"pointer",background:"white",color:"#475569"}}>Cancel</button>
+          <button onClick={save} style={{background:AC,border:"none",borderRadius:8,padding:"8px 20px",fontSize:13,fontWeight:600,cursor:"pointer",color:"white"}}>Save Changes</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ═══ USER MANAGER ══════════════════════════════════════ */
+function UserMgr(){
+  const {users,setUsers,setShowUserMgr}=useCx();
+  const [form,setForm]=useState({name:"",email:"",role:"Editor",pwd:""});
+  const [invited,setInvited]=useState(null);
+  const addUser=async ()=>{
+    if(!form.name||!form.email||!form.pwd)return alert("Fill all fields");
+    try{
+      await apiSend("/api/users","POST",{name:form.name,email:form.email,password:form.pwd,role:form.role});
+      const upd=await apiGet("/api/users");
+      setUsers(upd);saveLS(USERS_KEY,upd);
+      setInvited({...form,tempPwd:form.pwd});
+      setForm({name:"",email:"",role:"Editor",pwd:""});
+    }catch(e){
+      alert("Could not add user. The email may already exist.");
+    }
+  };
+  const del=id=>{if(!confirm("Remove this user?"))return;const upd=users.filter(u=>u.id!==id);setUsers(upd);saveLS(USERS_KEY,upd)};
+  return(
+    <div style={{position:"fixed",inset:0,background:"rgba(15,22,41,0.6)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:400}}>
+      <div style={{background:"white",borderRadius:16,width:580,maxHeight:"85vh",overflow:"hidden",display:"flex",flexDirection:"column",boxShadow:"0 24px 80px rgba(0,0,0,0.25)"}}>
+        <div style={{padding:"18px 22px",borderBottom:"1px solid #E2E8F0",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+          <h3 style={{margin:0,fontSize:17,fontWeight:700,color:"#1E293B"}}>Team Members</h3>
+          <button onClick={()=>setShowUserMgr(false)} style={{border:"none",background:"#F1F5F9",cursor:"pointer",width:30,height:30,borderRadius:7,fontSize:16}}>✕</button>
+        </div>
+        <div style={{overflow:"auto",flex:1,padding:"16px 22px"}}>
+          {invited&&(
+            <div style={{background:"#ECFDF5",border:"1px solid #6EE7B7",borderRadius:10,padding:"12px 14px",marginBottom:14}}>
+              <div style={{fontWeight:700,fontSize:13,color:"#065F46",marginBottom:4}}> User added! Share these credentials:</div>
+              <div style={{fontFamily:"'JetBrains Mono',monospace",fontSize:12,color:"#047857"}}>Email: {invited.email}<br/>Temp Password: {invited.tempPwd}</div>
+              <div style={{fontSize:11,color:"#6EE7B7",marginTop:4}}> Email delivery requires backend setup — share manually for now</div>
+              <button onClick={()=>setInvited(null)} style={{marginTop:6,fontSize:11,color:"#065F46",border:"none",background:"none",cursor:"pointer"}}>Dismiss</button>
+            </div>
+          )}
+          {users.map(u=>(
+            <div key={u.id} style={{display:"flex",alignItems:"center",gap:12,padding:"10px",borderRadius:8,border:"1px solid #E2E8F0",marginBottom:8}}>
+              <Ava name={u.name} size={36}/>
+              <div style={{flex:1}}>
+                <div style={{fontSize:14,fontWeight:600,color:"#1E293B"}}>{u.name}</div>
+                <div style={{fontSize:12,color:"#64748B"}}>{u.email}</div>
+              </div>
+              <span style={{fontSize:11,fontWeight:600,padding:"3px 10px",borderRadius:999,background:u.role==="Admin"?"#EEF2FF":"#F8FAFF",color:u.role==="Admin"?AC:"#475569"}}>{u.role}</span>
+              {u.id!=="admin"&&<button onClick={()=>del(u.id)} style={{border:"none",background:"none",cursor:"pointer",color:"#F87171",fontSize:14}}>Delete</button>}
+            </div>
+          ))}
+          <div style={{marginTop:14,padding:"14px",background:"#F8FAFF",borderRadius:10,border:"1px solid #E2E8F0"}}>
+            <div style={{fontSize:12,fontWeight:700,color:"#1E293B",marginBottom:10}}>Invite New Member</div>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
+              {[["Name","name","text"],["Email","email","email"],["Temp Password","pwd","text"],["Role","role","select"]].map(([l,f,t])=>(
+                <div key={f}><div style={{fontSize:10,fontWeight:700,color:"#64748B",textTransform:"uppercase",letterSpacing:"0.06em",marginBottom:4}}>{l}</div>
+                {t==="select"?<select value={form[f]} onChange={e=>setForm(p=>({...p,[f]:e.target.value}))} style={{width:"100%",padding:"7px 8px",border:"1px solid #E2E8F0",borderRadius:7,fontSize:13,fontFamily:"inherit",outline:"none"}}>
+                  <option>Admin</option><option>Editor</option><option>Viewer</option></select>
+                :<input type={t} value={form[f]} onChange={e=>setForm(p=>({...p,[f]:e.target.value}))} style={{width:"100%",padding:"7px 10px",border:"1px solid #E2E8F0",borderRadius:7,fontSize:13,fontFamily:"inherit",outline:"none",boxSizing:"border-box"}}/>}
+                </div>
+              ))}
+            </div>
+            <button onClick={addUser} style={{marginTop:10,background:AC,border:"none",borderRadius:8,padding:"8px 20px",fontSize:13,fontWeight:600,cursor:"pointer",color:"white",width:"100%"}}>Add Member</button>
+          </div>
+        </div>
+        <div style={{padding:"10px 22px",borderTop:"1px solid #E2E8F0",display:"flex",justifyContent:"flex-end"}}>
+          <button onClick={()=>setShowUserMgr(false)} style={{background:"#F1F5F9",border:"none",borderRadius:8,padding:"8px 18px",fontSize:13,cursor:"pointer",color:"#475569"}}>Done</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ═══ EXE INSTRUCTIONS ══════════════════════════════════ */
+function ExeModal(){
+  const {setShowExe}=useCx();
+  const steps=[
+    ["1. Install Node.js","Download from nodejs.org → install (includes npm)"],
+    ["2. Create project folder","mkdir PMHub && cd PMHub"],
+    ["3. Copy this HTML","Save this file as: PMHub/index.html"],
+    ["4. Create main.js","See code block below"],
+    ["5. Init + install Electron","npm init -y && npm install electron electron-builder --save-dev"],
+    ["6. Add to package.json",'"main": "main.js", "scripts": { "start": "electron .", "build": "electron-builder" }'],
+    ["7. Test app","npm start — your app opens as a desktop window!"],
+    ["8. Build .exe","npm run build — creates a /dist folder with installer"],
+    ["9. Share the .exe","Send dist/PMHub Setup.exe to anyone — no install needed on their side"],
+  ];
+  const mainJs=`const {app,BrowserWindow}=require('electron');\nconst path=require('path');\nfunction createWindow(){\n  const win=new BrowserWindow({width:1400,height:900,\n    webPreferences:{nodeIntegration:false}});\n  win.loadFile('index.html');\n}\napp.whenReady().then(createWindow);\napp.on('window-all-closed',()=>app.quit());`;
+  return(
+    <div style={{position:"fixed",inset:0,background:"rgba(15,22,41,0.6)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:400,overflow:"auto",padding:"20px 0"}}>
+      <div style={{background:"white",borderRadius:16,width:600,boxShadow:"0 24px 80px rgba(0,0,0,0.25)",maxHeight:"90vh",overflow:"auto"}}>
+        <div style={{padding:"18px 22px",borderBottom:"1px solid #E2E8F0",display:"flex",justifyContent:"space-between",alignItems:"center",position:"sticky",top:0,background:"white",zIndex:1}}>
+          <h3 style={{margin:0,fontSize:17,fontWeight:700,color:"#1E293B"}}> Convert to Desktop App (.exe)</h3>
+          <button onClick={()=>setShowExe(false)} style={{border:"none",background:"#F1F5F9",cursor:"pointer",width:30,height:30,borderRadius:7,fontSize:16}}>✕</button>
+        </div>
+        <div style={{padding:"16px 22px"}}>
+          <div style={{background:"#EEF2FF",borderRadius:10,padding:"10px 14px",marginBottom:16,fontSize:13,color:AC,fontWeight:500}}>Uses Electron — the same technology as VS Code, Slack, and Discord.</div>
+          {steps.map(([t,d])=>(
+            <div key={t} style={{display:"flex",gap:12,marginBottom:12}}>
+              <div style={{width:22,height:22,borderRadius:"50%",background:AC,color:"white",display:"flex",alignItems:"center",justifyContent:"center",fontSize:11,fontWeight:700,flexShrink:0,marginTop:1}}>{t[0]}</div>
+              <div><div style={{fontWeight:600,fontSize:13,color:"#1E293B"}}>{t.slice(3)}</div><div style={{fontSize:12,color:"#64748B",fontFamily:d.includes(" ")?"inherit":"'JetBrains Mono',monospace",marginTop:2}}>{d}</div></div>
+            </div>
+          ))}
+          <div style={{marginTop:14}}>
+            <div style={{fontSize:12,fontWeight:700,color:"#64748B",marginBottom:6}}>📄 main.js content:</div>
+            <pre style={{background:"#0F1629",color:"#A5B4FC",padding:"12px",borderRadius:8,fontSize:11,fontFamily:"'JetBrains Mono',monospace",overflow:"auto",lineHeight:1.5}}>{mainJs}</pre>
+          </div>
+          <div style={{marginTop:12,padding:"10px 12px",background:"#FEF9C3",borderRadius:8,fontSize:12,color:"#854D0E"}}>
+            💡 <strong>Tip:</strong> Use electron-builder for professional installers. Set icon.png in package.json for a custom icon.
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ═══ DASHBOARD ═════════════════════════════════════════ */
+function Dashboard(){
+  const {projects,tasks,activeProjectId,openProject,createProject}=useCx();
+  const overallBudget=tasks.filter(t=>t.level===0).reduce((s,t)=>s+(t.budget||0),0);
+  const overallSpent=tasks.filter(t=>t.level===0).reduce((s,t)=>s+(t.spent||0),0);
+  const total=tasks.length,done=tasks.filter(t=>t.status==="Completed").length;
+  const inProg=tasks.filter(t=>t.status==="In Progress").length;
+  const avgProg=total?Math.round(tasks.reduce((s,t)=>s+(t.prog||0),0)/total):0;
+  const statusDist=Object.keys(STATUS_CFG).map(s=>({s,n:tasks.filter(t=>t.status===s).length}));
+  const upcoming=tasks.filter(t=>t.end&&new Date(t.end)>=new Date()).sort((a,b)=>new Date(a.end)-new Date(b.end)).slice(0,5);
+  return(
+    <div style={{overflow:"auto",height:"100%",padding:"20px 24px",background:"#F8FAFF"}}>
+      <div style={{marginBottom:20}}>
+        <h2 style={{margin:"0 0 4px",fontSize:20,fontWeight:800,color:"#1E293B"}}>Dashboard</h2>
+        <p style={{color:"#64748B",fontSize:13,margin:0}}>Overview of all active work</p>
+      </div>
+      {/* KPI row */}
+      <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:14,marginBottom:20}}>
+        {[{l:"Total Tasks",v:total,c:"#6366F1",icon:""},{l:"Completed",v:done,c:"#16A34A",icon:""},{l:"In Progress",v:inProg,c:"#2563EB",icon:""},{l:"Overall Progress",v:avgProg+"%",c:"#6366F1",icon:""}].map(({l,v,c,icon})=>(
+          <div key={l} style={{background:"white",borderRadius:12,padding:"16px",border:"1px solid #E2E8F0",boxShadow:"0 1px 4px rgba(0,0,0,0.05)"}}>
+            <div style={{fontSize:22,marginBottom:6}}>{icon}</div>
+            <div style={{fontSize:26,fontWeight:800,color:c,lineHeight:1}}>{v}</div>
+            <div style={{fontSize:12,color:"#94A3B8",marginTop:4,fontWeight:500}}>{l}</div>
+          </div>
+        ))}
+      </div>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14,marginBottom:20}}>
+        {/* Budget card */}
+        <div style={{background:"white",borderRadius:12,padding:"16px",border:"1px solid #E2E8F0"}}>
+          <div style={{fontWeight:700,fontSize:14,color:"#1E293B",marginBottom:12}}> Budget Overview</div>
+          <div style={{display:"flex",justifyContent:"space-between",marginBottom:6}}>
+            <span style={{fontSize:13,color:"#64748B"}}>Total Budget</span>
+            <span style={{fontSize:14,fontWeight:700,color:"#059669"}}>{fmtC(overallBudget)}</span>
+          </div>
+          <div style={{display:"flex",justifyContent:"space-between",marginBottom:8}}>
+            <span style={{fontSize:13,color:"#64748B"}}>Actual Spent</span>
+            <span style={{fontSize:14,fontWeight:700,color:"#D97706"}}>{fmtC(overallSpent)}</span>
+          </div>
+          <div style={{height:8,background:"#E2E8F0",borderRadius:999,overflow:"hidden",marginBottom:4}}>
+            <div style={{width:Math.min(100,overallBudget?Math.round(overallSpent/overallBudget*100):0)+"%",height:"100%",background:overallSpent>overallBudget?"#EF4444":"#10B981",borderRadius:999}}/>
+          </div>
+          <div style={{fontSize:11,color:"#94A3B8",textAlign:"right"}}>{overallBudget?Math.round(overallSpent/overallBudget*100):0}% utilized · {fmtC(overallBudget-overallSpent)} remaining</div>
+        </div>
+        {/* Status distribution */}
+        <div style={{background:"white",borderRadius:12,padding:"16px",border:"1px solid #E2E8F0"}}>
+          <div style={{fontWeight:700,fontSize:14,color:"#1E293B",marginBottom:12}}> Status Distribution</div>
+          {statusDist.map(({s,n})=>(
+            <div key={s} style={{display:"flex",alignItems:"center",gap:8,marginBottom:7}}>
+              <SBadge s={s}/>
+              <div style={{flex:1,height:6,background:"#E2E8F0",borderRadius:999,overflow:"hidden"}}>
+                <div style={{width:(total?Math.round(n/total*100):0)+"%",height:"100%",background:STATUS_CFG[s]?.dot,borderRadius:999}}/>
+              </div>
+              <span style={{fontSize:11,fontWeight:600,color:"#64748B",minWidth:20,textAlign:"right"}}>{n}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14}}>
+        {/* Upcoming deadlines */}
+        <div style={{background:"white",borderRadius:12,padding:"16px",border:"1px solid #E2E8F0"}}>
+          <div style={{fontWeight:700,fontSize:14,color:"#1E293B",marginBottom:12}}> Upcoming Deadlines</div>
+          {upcoming.length===0?<div style={{color:"#94A3B8",fontSize:13}}>No upcoming tasks</div>:upcoming.map(t=>{
+            const d=new Date(t.end),diff=Math.round((d-new Date())/86400000);
+            const urgent=diff<=3;
+            return<div key={t.id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"7px 0",borderBottom:"1px solid #F1F5F9"}}>
+              <div><div style={{fontSize:13,fontWeight:500,color:"#1E293B",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",maxWidth:200}}>{t.name}</div><SBadge s={t.status}/></div>
+              <div style={{textAlign:"right",flexShrink:0}}>
+                <div style={{fontSize:12,fontWeight:600,color:urgent?"#EF4444":"#374151"}}>{fmtD(t.end)}</div>
+                <div style={{fontSize:11,color:urgent?"#EF4444":"#94A3B8"}}>{diff===0?"Today":diff===1?"Tomorrow":diff<0?`${-diff}d overdue`:`${diff}d left`}</div>
+              </div>
+            </div>;
+          })}
+        </div>
+        {/* Projects list */}
+        <div style={{background:"white",borderRadius:12,padding:"16px",border:"1px solid #E2E8F0"}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
+            <div style={{fontWeight:700,fontSize:14,color:"#1E293B"}}> Projects</div>
+            <button onClick={async ()=>{const n=prompt("New project name:");if(n)await createProject(n)}} style={{fontSize:12,color:AC,border:`1px solid ${AC}`,background:"transparent",borderRadius:6,padding:"3px 10px",cursor:"pointer",fontWeight:600}}>+ New</button>
+          </div>
+          {projects.map(p=>{
+            const isA=p.id===activeProjectId;
+            const pd=loadLS(PK(p.id));
+            const pp=pd&&pd.tasks.length?Math.round(pd.tasks.reduce((s,t)=>s+(t.prog||0),0)/pd.tasks.length):0;
+            return<div key={p.id} onClick={()=>openProject(p.id)} style={{display:"flex",gap:10,alignItems:"center",padding:"8px 10px",borderRadius:8,cursor:"pointer",background:isA?"#EEF2FF":"transparent",marginBottom:4,border:isA?`1px solid #C7D2FE`:"1px solid transparent"}}>
+              <div style={{width:32,height:32,borderRadius:8,background:isA?"linear-gradient(135deg,#6366F1,#818CF8)":"#F1F5F9",display:"flex",alignItems:"center",justifyContent:"center",fontSize:14,flexShrink:0}}>{isA?"":""}</div>
+              <div style={{flex:1,minWidth:0}}><div style={{fontSize:13,fontWeight:isA?700:500,color:"#1E293B",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{p.name}</div>
+                <div style={{height:3,background:"#E2E8F0",borderRadius:999,overflow:"hidden",marginTop:4}}><div style={{width:pp+"%",height:"100%",background:pp===100?"#22C55E":AC,borderRadius:999}}/></div></div>
+              <span style={{fontSize:11,color:"#94A3B8",flexShrink:0}}>{pp}%</span>
+            </div>;
+          })}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ═══ SHEET VIEW (top-level — fixes edit bug) ═══════════ */
+function SheetView(){
+  const {tasks,setTasks,currentUser,columns,editing,setEditing,editVal,setEditVal,sort,setSort,q,statusFilter,setCardId,taskStyles,setTaskStyles}=useCx();
+  const [dragId,setDragId]=useState(null);
+  const [dragOver,setDragOver]=useState(null);
+  const [dragPos,setDragPos]=useState("bot");
+  const [fmtRow,setFmtRow]=useState(null); // row being formatted
+  const visCols=columns.filter(c=>c.visible);
+
+  const filtered=useMemo(()=>{
+    let r=[...tasks];
+    if(q){const lq=q.toLowerCase();r=r.filter(t=>t.name.toLowerCase().includes(lq)||(t.asn||"").toLowerCase().includes(lq)||t.wbs.includes(lq))}
+    if(statusFilter!=="all")r=r.filter(t=>t.status===statusFilter);
+    if(sort.f){r.sort((a,b)=>{const av=a[sort.f],bv=b[sort.f];if(typeof av==="number")return sort.d==="asc"?av-bv:bv-av;return sort.d==="asc"?String(av||"").localeCompare(String(bv||"")):String(bv||"").localeCompare(String(av||""))});}
+    return r;
+  },[tasks,q,statusFilter,sort]);
+
+  const startEdit=(id,f,v)=>{setEditing({id,f});setEditVal(String(v??""))};
+  const commitEdit=()=>{
+    if(!editing)return;
+    setTasks(prev=>prev.map(t=>{
+      if(t.id!==editing.id)return t;
+      const nf=["prog","budget","spent","dur"];
+      let val=nf.includes(editing.f)?Math.max(0,Number(editVal)||0):editVal;
+      if(editing.f==="prog")val=Math.min(100,val);
+      const u={...t,[editing.f]:val};
+      if((editing.f==="start"||editing.f==="end")&&u.start&&u.end)u.dur=daysBetween(u.start,u.end);
+      return u;
+    }));
+    setEditing(null);
+  };
+
+  const addRow=()=>{
+    const id=uid();
+    setTasks(prev=>[...prev,{id,wbs:String(prev.filter(t=>t.level===0).length+1),name:"New Task",level:0,par:false,pid:null,start:today,end:today,dur:1,prog:0,status:"Not Started",prio:"Medium",asn:currentUser?.name||"",ownerId:currentUser?.id||"",budget:0,spent:0,pred:"",notes:"",desc:"",subtasks:[],comments:[]}]);
+    setTimeout(()=>startEdit(id,"name","New Task"),50);
+  };
+
+  // Drag and drop
+  const onDragStart=(e,id)=>{setDragId(id);e.dataTransfer.effectAllowed="move"};
+  const onDragOver=(e,id,rect)=>{e.preventDefault();const mid=rect.top+rect.height/2;const pos=e.clientY<mid?"top":"bot";setDragOver(id);setDragPos(pos)};
+  const onDrop=(e,targetId)=>{
+    e.preventDefault();
+    if(!dragId||dragId===targetId){setDragId(null);setDragOver(null);return}
+    setTasks(prev=>{
+      const arr=[...prev];
+      const fromIdx=arr.findIndex(t=>t.id===dragId);
+      const toIdx=arr.findIndex(t=>t.id===targetId);
+      if(fromIdx<0||toIdx<0)return prev;
+      const [moved]=arr.splice(fromIdx,1);
+      const insertAt=dragPos==="top"?toIdx:toIdx+(fromIdx>toIdx?1:0);
+      arr.splice(insertAt,0,moved);
+      return arr;
+    });
+    setDragId(null);setDragOver(null);
+  };
+
+  const isEd=(id,f)=>editing?.id===id&&editing?.f===f;
+  const mkEdit=(f,type,opts)=><EditInput f={f} type={type} opts={opts} val={editVal} setVal={setEditVal} commit={commitEdit} cancel={()=>setEditing(null)}/>;
+  const ts=id=>taskStyles[id]||{};
+  const toggleBold=id=>setTaskStyles(p=>({...p,[id]:{...(p[id]||{}),bold:!(p[id]?.bold)}}));
+  const setRowColor=(id,v)=>setTaskStyles(p=>({...p,[id]:{...(p[id]||{}),rowBg:v}}));
+  const setTextColor=(id,v)=>setTaskStyles(p=>({...p,[id]:{...(p[id]||{}),txColor:v}}));
+
+  const renderCell=(t,col)=>{
+    const {id:tid,level,par}=t;
+    const f=col.field,v=t[f];
+    if(isEd(tid,f)){
+      const type=col.type==="status"?"select":col.type==="priority"?"select":col.type==="date"?"date":col.type==="number"||col.type==="currency"||col.type==="progress"?"number":"text";
+      const opts=col.type==="status"?Object.keys(STATUS_CFG):col.type==="priority"?Object.keys(PRIO_C):undefined;
+      return mkEdit(f,type,opts);
+    }
+    if(col.type==="status")return<SBadge s={v}/>;
+    if(col.type==="priority")return<PBadge p={v}/>;
+    if(col.type==="progress")return<PBar v={v||0}/>;
+    if(col.type==="currency")return<span style={{fontSize:12,fontWeight:500,color:(f==="spent"&&(v||0)>(t.budget||0))?"#EF4444":"#374151"}}>{fmtC(v)}</span>;
+    if(col.type==="date")return<span style={{fontSize:12,color:"#64748B"}}>{fmtD(v)}</span>;
+    if(f==="wbs")return<span style={{fontFamily:"'JetBrains Mono',monospace",fontSize:11,color:"#64748B"}}>{v}</span>;
+    if(f==="name")return<span style={{display:"inline-flex",alignItems:"center",gap:5,cursor:"pointer"}} onClick={e=>{e.stopPropagation();setCardId(tid)}}>
+      {par&&<span style={{width:14,height:14,borderRadius:3,background:"linear-gradient(135deg,#6366F1,#818CF8)",display:"inline-flex",alignItems:"center",justifyContent:"center",fontSize:8,color:"white",fontWeight:700,flexShrink:0}}>P</span>}
+      {!par&&level>0&&<span style={{width:6,height:1,background:"#CBD5E1",flexShrink:0,display:"inline-block",marginRight:2}}/>}
+      <span style={{textDecoration:"underline",textDecorationStyle:"dotted",textDecorationColor:"#CBD5E1"}}>{v}</span>
+    </span>;
+    if(f==="asn"&&v)return<span style={{display:"inline-flex",alignItems:"center",gap:5}}><Ava name={v} size={18}/><span style={{fontSize:12,overflow:"hidden",textOverflow:"ellipsis"}}>{v}</span></span>;
+    return<span style={{fontSize:12,color:"#64748B",display:"block",overflow:"hidden",textOverflow:"ellipsis"}}>{v}</span>;
+  };
+
+  const stats=useMemo(()=>({
+    total:filtered.length,
+    avgProg:filtered.length?Math.round(filtered.reduce((s,t)=>s+(t.prog||0),0)/filtered.length):0,
+    budget:filtered.filter(t=>t.level===0).reduce((s,t)=>s+(t.budget||0),0),
+    spent:filtered.filter(t=>t.level===0).reduce((s,t)=>s+(t.spent||0),0),
+  }),[filtered]);
+
+  const TH={padding:"8px 10px",textAlign:"left",color:"#64748B",fontWeight:600,fontSize:11,textTransform:"uppercase",letterSpacing:"0.06em",borderBottom:"2px solid #E2E8F0",whiteSpace:"nowrap",userSelect:"none",cursor:"pointer"};
+  return(
+    <div style={{display:"flex",flexDirection:"column",height:"100%",overflow:"hidden"}}>
+      {/* Format toolbar */}
+      {fmtRow&&(
+        <div style={{display:"flex",alignItems:"center",gap:10,padding:"5px 14px",background:"#EEF2FF",borderBottom:"1px solid #C7D2FE",flexShrink:0,fontSize:12}}>
+          <span style={{color:AC,fontWeight:600,fontSize:11}}>Format Row:</span>
+          <button onClick={()=>toggleBold(fmtRow)} style={{fontWeight:"bold",border:"1px solid #C7D2FE",borderRadius:5,padding:"2px 10px",cursor:"pointer",background:ts(fmtRow).bold?"#6366F1":"white",color:ts(fmtRow).bold?"white":AC,fontSize:13}}>B</button>
+          <label style={{display:"flex",alignItems:"center",gap:4,color:"#64748B",cursor:"pointer"}}>Row Color:<input type="color" defaultValue={ts(fmtRow).rowBg||"#ffffff"} onChange={e=>setRowColor(fmtRow,e.target.value)} style={{width:28,height:24}}/></label>
+          <label style={{display:"flex",alignItems:"center",gap:4,color:"#64748B",cursor:"pointer"}}>Text:<input type="color" defaultValue={ts(fmtRow).txColor||"#374151"} onChange={e=>setTextColor(fmtRow,e.target.value)} style={{width:28,height:24}}/></label>
+          <button onClick={()=>{setTaskStyles(p=>{const n={...p};delete n[fmtRow];return n});}} style={{fontSize:11,border:"1px solid #E2E8F0",borderRadius:5,padding:"2px 8px",cursor:"pointer",background:"white",color:"#64748B"}}>Reset</button>
+          <button onClick={()=>setFmtRow(null)} style={{marginLeft:"auto",fontSize:11,border:"none",background:"none",cursor:"pointer",color:"#94A3B8"}}>✕ Close</button>
+        </div>
+      )}
+      <div style={{overflow:"auto",flex:1}}>
+        <table style={{borderCollapse:"collapse",tableLayout:"fixed",minWidth:"100%",fontSize:13}}>
+          <colgroup>
+            <col style={{width:22}}/><col style={{width:22}}/>{visCols.map(c=><col key={c.id} style={{width:c.width}}/>)}<col style={{width:38}}/>
+          </colgroup>
+          <thead style={{position:"sticky",top:0,zIndex:10}}>
+            <tr style={{background:"#F8FAFF"}}>
+              <th style={TH}/><th style={TH}/>
+              {visCols.map(c=>(
+                <th key={c.id} onClick={()=>setSort(p=>({f:c.field,d:p.f===c.field&&p.d==="asc"?"desc":"asc"}))} style={{...TH,textAlign:c.align}}>
+                  <span style={{display:"inline-flex",alignItems:"center",gap:3}}>{c.label}{sort.f===c.field&&<span style={{color:AC,fontSize:9}}>{sort.d==="asc"?"":""}</span>}</span>
+                </th>
+              ))}
+              <th style={TH}/>
+            </tr>
+          </thead>
+          <tbody>
+            {filtered.map((t,i)=>{
+              const sty=ts(t.id);
+              const bg=sty.rowBg||(i%2===0?"#fff":"#FAFBFF");
+              const txc=sty.txColor||"#374151";
+              const fw=sty.bold?"700":"400";
+              const isParent=t.par;
+              const cellS=ex=>({padding:"7px 10px",borderBottom:"1px solid #F1F5F9",background:bg,fontWeight:isParent?"600":fw,color:isParent?"#1E293B":txc,verticalAlign:"middle",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",...ex});
+              const isOver=dragOver===t.id;
+              return(
+                <tr key={t.id}
+                  draggable
+                  onDragStart={e=>onDragStart(e,t.id)}
+                  onDragOver={e=>{const rect=e.currentTarget.getBoundingClientRect();onDragOver(e,t.id,rect)}}
+                  onDrop={e=>onDrop(e,t.id)}
+                  onDragEnd={()=>{setDragId(null);setDragOver(null)}}
+                  onClick={()=>setFmtRow(fmtRow===t.id?null:t.id)}
+                  className={isOver?(dragPos==="top"?"drag-over-top":"drag-over-bot"):""}
+                  style={{cursor:"grab",opacity:dragId===t.id?0.4:1}}
+                  onMouseEnter={e=>e.currentTarget.querySelectorAll("td").forEach(td=>td.style.background=i%2===0?"#F0F4FF":"#EBEEFF")}
+                  onMouseLeave={e=>e.currentTarget.querySelectorAll("td").forEach(td=>td.style.background=bg)}>
+                  <td style={{...cellS(),padding:"0 0 0 4px",cursor:"grab"}}><span style={{fontSize:10,color:"#CBD5E1",userSelect:"none"}}>⠿</span></td>
+                  <td style={{...cellS(),padding:"0 0 0 2px"}}><div style={{width:13,height:13,border:"1.5px solid #CBD5E1",borderRadius:3}}/></td>
+                  {visCols.map(col=>(
+                    <td key={col.id} onDoubleClick={e=>{e.stopPropagation();startEdit(t.id,col.field,t[col.field])}}
+                      style={cellS({textAlign:col.align,paddingLeft:col.field==="name"?10+t.level*14:10})}>
+                      {renderCell(t,col)}
+                    </td>
+                  ))}
+                  <td style={cellS({textAlign:"center",padding:"0 4px"})}>
+                    <button onClick={e=>{e.stopPropagation();setTasks(p=>p.filter(x=>x.id!==t.id&&x.pid!==t.id))}} style={{border:"none",background:"none",cursor:"pointer",color:"#F87171",fontSize:13,opacity:0.5}}>✕</button>
+                  </td>
+                </tr>
+              );
+            })}
+            {/* + Add row */}
+            <tr>
+              <td colSpan={visCols.length+3} style={{padding:"6px 10px",borderBottom:"none"}}>
+                <button onClick={addRow} style={{display:"flex",alignItems:"center",gap:6,fontSize:12,color:"#94A3B8",border:"1px dashed #CBD5E1",background:"transparent",cursor:"pointer",borderRadius:6,padding:"5px 12px",fontFamily:"inherit",transition:"all .15s"}}
+                  onMouseEnter={e=>{e.currentTarget.style.color=AC;e.currentTarget.style.borderColor=AC}}
+                  onMouseLeave={e=>{e.currentTarget.style.color="#94A3B8";e.currentTarget.style.borderColor="#CBD5E1"}}>
+                  <span style={{fontSize:16,lineHeight:1}}>+</span> Add Task
+                </button>
+              </td>
+            </tr>
+          </tbody>
+          {filtered.length>0&&(
+            <tfoot>
+              <tr style={{background:"#F0F4FF",borderTop:"2px solid #E2E8F0"}}>
+                <td colSpan={4} style={{padding:"8px 10px",fontSize:12,fontWeight:600,color:AC}}>{stats.total} tasks</td>
+                {visCols.map(c=>{
+                  if(c.field==="prog")return<td key={c.id} style={{padding:"8px 10px"}}><PBar v={stats.avgProg}/></td>;
+                  if(c.field==="budget")return<td key={c.id} style={{padding:"8px 10px",textAlign:"right",fontWeight:700,color:"#10B981",fontSize:13}}>{fmtC(stats.budget)}</td>;
+                  if(c.field==="spent")return<td key={c.id} style={{padding:"8px 10px",textAlign:"right",fontWeight:700,color:"#F59E0B",fontSize:13}}>{fmtC(stats.spent)}</td>;
+                  return<td key={c.id}/>;
+                })}
+                <td/>
+              </tr>
+            </tfoot>
+          )}
+        </table>
+      </div>
+    </div>
+  );
+}
+
+/* ═══ GANTT VIEW (top-level) ═══════════════════════════ */
+function GanttView(){
+  const {tasks,setTasks,collapsed,setCollapsed}=useCx();
+  const listRef=useRef(null),chartRef=useRef(null),syncing=useRef(false);
+  const toggleCol=id=>setCollapsed(p=>{const n=new Set(p);n.has(id)?n.delete(id):n.add(id);return n});
+  const onLS=e=>{if(syncing.current)return;syncing.current=true;if(chartRef.current)chartRef.current.scrollTop=e.target.scrollTop;requestAnimationFrame(()=>{syncing.current=false})};
+  const onCS=e=>{if(syncing.current)return;syncing.current=true;if(listRef.current)listRef.current.scrollTop=e.target.scrollTop;requestAnimationFrame(()=>{syncing.current=false})};
+
+  const wbsTasks=useMemo(()=>{
+    const out=[];
+    const add=pid=>tasks.filter(t=>t.pid===pid).forEach(t=>{out.push(t);if(t.par&&!collapsed.has(t.id))add(t.id)});
+    tasks.filter(t=>t.pid===null).forEach(t=>{out.push(t);if(t.par&&!collapsed.has(t.id))add(t.id)});
+    return out;
+  },[tasks,collapsed]);
+
+  const gantt=useMemo(()=>{
+    const all=tasks.flatMap(t=>[new Date(t.start),new Date(t.end)]).filter(d=>!isNaN(d));
+    if(!all.length)return null;
+    const mn=new Date(Math.min(...all)),mx=new Date(Math.max(...all));
+    const start=new Date(mn.getFullYear(),mn.getMonth(),1);
+    const end=new Date(mx.getFullYear(),mx.getMonth()+1,0);
+    const ms=end-start,months=[];
+    let c=new Date(start);
+    while(c<=end){months.push(new Date(c));c=new Date(c.getFullYear(),c.getMonth()+1,1)}
+    const pct=d=>Math.max(0,Math.min(100,((new Date(d)-start)/ms)*100));
+    return{start,end,months,pct,todayPct:pct(new Date())};
+  },[tasks]);
+
+  if(!gantt||tasks.length===0)return<div style={{padding:40,textAlign:"center",color:"#94A3B8"}}><div style={{fontSize:32,marginBottom:8}}></div>No tasks to display.</div>;
+  const ROW=40,HDR=44,BH=22,LW=320,svgH=wbsTasks.length*ROW+HDR;
+
+  return(
+    <div style={{display:"flex",height:"100%",overflow:"hidden"}}>
+      <div ref={listRef} onScroll={onLS} style={{width:LW,flexShrink:0,overflow:"auto",borderRight:"1px solid #E2E8F0",background:"white"}}>
+        <div style={{height:HDR,display:"flex",alignItems:"center",padding:"0 12px",position:"sticky",top:0,background:"#F8FAFF",borderBottom:"1px solid #E2E8F0",zIndex:2,fontSize:11,fontWeight:600,color:"#64748B",textTransform:"uppercase",letterSpacing:"0.06em"}}>Task Name</div>
+        {wbsTasks.map((t,i)=>(
+          <div key={t.id} style={{height:ROW,display:"flex",alignItems:"center",paddingLeft:10+t.level*14,paddingRight:8,gap:5,borderBottom:"1px solid #F1F5F9",background:i%2===0?"white":"#FAFBFF"}}>
+            {t.par?<button onClick={()=>toggleCol(t.id)} style={{border:"none",background:"none",cursor:"pointer",color:"#94A3B8",padding:0,fontSize:10,lineHeight:1,flexShrink:0}}>{collapsed.has(t.id)?"▶":""}</button>:<span style={{width:12,display:"inline-block"}}/>}
+            <span style={{fontSize:12,fontWeight:t.par?600:400,color:t.par?"#1E293B":"#374151",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",flex:1}}>{t.name}</span>
+            <span style={{fontSize:10,color:"#94A3B8",flexShrink:0}}>{t.prog}%</span>
+          </div>
+        ))}
+      </div>
+      <div ref={chartRef} onScroll={onCS} style={{flex:1,overflow:"auto"}}>
+        <svg width="100%" height={Math.max(svgH,200)} style={{minWidth:600,display:"block"}}>
+          <defs><clipPath id="bc"><rect x="0" y={HDR} width="100%" height={svgH-HDR}/></clipPath></defs>
+          {gantt.months.map((m,i)=>{const x1=gantt.pct(m),x2=i+1<gantt.months.length?gantt.pct(gantt.months[i+1]):100,w=x2-x1;return<g key={i}><rect x={x1+"%"} y={0} width={w+"%"} height={HDR} fill={i%2===0?"#F8FAFF":"#F1F5F9"} stroke="#E2E8F0" strokeWidth={0.5}/><text x={(x1+0.4)+"%"} y={HDR/2+5} fontSize={11} fill="#64748B" fontWeight={500}>{MONTHS[m.getMonth()]} {m.getFullYear()}</text></g>})}
+          {wbsTasks.map((t,i)=><rect key={t.id+"bg"} x={0} y={HDR+i*ROW} width="100%" height={ROW} fill={i%2===0?"white":"#FAFBFF"}/>)}
+          {gantt.months.map((m,i)=><line key={i+"vl"} x1={gantt.pct(m)+"%"} y1={HDR} x2={gantt.pct(m)+"%"} y2={svgH} stroke="#E2E8F0" strokeWidth={0.5} strokeDasharray="3,3"/>)}
+          {wbsTasks.map((t,i)=><line key={t.id+"hl"} x1={0} y1={HDR+(i+1)*ROW} x2="100%" y2={HDR+(i+1)*ROW} stroke="#F1F5F9" strokeWidth={1}/>)}
+          {wbsTasks.map((t,i)=>{
+            const lp=gantt.pct(t.start),rp=gantt.pct(t.end),w=Math.max(rp-lp,0.4),y=HDR+i*ROW+(ROW-BH)/2,col=GANTT_C[t.status]||"#94A3B8",pw=w*(t.prog/100);
+            return<g key={t.id} clipPath="url(#bc)">
+              <rect x={lp+"%"} y={y} width={w+"%"} height={BH} rx={5} fill={col} opacity={0.15}/>
+              {t.prog>0&&<rect x={lp+"%"} y={y} width={Math.max(pw,0.2)+"%"} height={BH} rx={5} fill={col}/>}
+              <rect x={lp+"%"} y={y} width={w+"%"} height={BH} rx={5} fill="none" stroke={col} strokeWidth={1.5}/>
+              {w>4&&<text x={(lp+0.5)+"%"} y={y+BH/2+4} fontSize={10} fill={t.prog>55?"white":col} fontWeight={500}>{t.prog}%</text>}
+            </g>;
+          })}
+          {gantt.todayPct>=0&&gantt.todayPct<=100&&<g>
+            <line x1={gantt.todayPct+"%"} y1={0} x2={gantt.todayPct+"%"} y2={svgH} stroke="#EF4444" strokeWidth={1.5} strokeDasharray="4,3" opacity={0.8}/>
+            <rect x={(gantt.todayPct-0.4)+"%"} y={HDR-16} width={38} height={15} rx={4} fill="#EF4444"/>
+            <text x={gantt.todayPct+"%"} y={HDR-5} fontSize={10} fill="white" fontWeight={700} textAnchor="middle">TODAY</text>
+          </g>}
+        </svg>
+      </div>
+    </div>
+  );
+}
+
+/* ═══ WBS VIEW (top-level) ════════════════════════════ */
+function WBSView(){
+  const {tasks,setTasks,collapsed,setCollapsed,setCardId}=useCx();
+  const toggleCol=id=>setCollapsed(p=>{const n=new Set(p);n.has(id)?n.delete(id):n.add(id);return n});
+  const wbsT=useMemo(()=>{
+    const out=[];
+    const add=pid=>tasks.filter(t=>t.pid===pid).forEach(t=>{out.push(t);if(t.par&&!collapsed.has(t.id))add(t.id)});
+    tasks.filter(t=>t.pid===null).forEach(t=>{out.push(t);if(t.par&&!collapsed.has(t.id))add(t.id)});
+    return out;
+  },[tasks,collapsed]);
+  if(wbsT.length===0)return<div style={{padding:40,textAlign:"center",color:"#94A3B8"}}><div style={{fontSize:32,marginBottom:8}}>🌿</div>No tasks yet.</div>;
+  return(
+    <div style={{overflow:"auto",height:"100%",padding:"16px 20px"}}>
+      {wbsT.map(t=>(
+        <div key={t.id} style={{marginLeft:t.level*24,marginBottom:t.par?10:5,background:"white",borderRadius:10,border:t.par?`2px solid ${AC}`:"1px solid #E2E8F0",padding:"10px 14px",display:"flex",alignItems:"center",gap:10,boxShadow:t.par?"0 2px 10px rgba(99,102,241,0.08)":"0 1px 3px rgba(0,0,0,0.04)"}}>
+          {t.par?<button onClick={()=>toggleCol(t.id)} style={{border:"none",cursor:"pointer",background:"rgba(99,102,241,0.1)",color:AC,padding:"2px 7px",fontSize:11,borderRadius:4,flexShrink:0}}>{collapsed.has(t.id)?"▶":""}</button>:<span style={{width:8,height:8,borderRadius:"50%",background:"#CBD5E1",flexShrink:0,display:"inline-block"}}/>}
+          <span style={{fontFamily:"'JetBrains Mono',monospace",fontSize:11,color:"#94A3B8",fontWeight:600,minWidth:36,flexShrink:0}}>{t.wbs}</span>
+          <span onClick={()=>setCardId(t.id)} style={{fontSize:t.par?14:13,fontWeight:t.par?700:500,color:t.par?"#1E293B":"#374151",flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",cursor:"pointer",textDecoration:"underline",textDecorationStyle:"dotted",textDecorationColor:"#CBD5E1"}}>{t.name}</span>
+          <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap",flexShrink:0}}>
+            <SBadge s={t.status}/><PBadge p={t.prio}/>
+            <div style={{width:80}}><PBar v={t.prog}/></div>
+            {t.asn&&<span style={{display:"inline-flex",alignItems:"center",gap:4}}><Ava name={t.asn} size={18}/><span style={{fontSize:11,color:"#64748B"}}>{t.asn}</span></span>}
+            <span style={{fontSize:11,color:"#94A3B8",whiteSpace:"nowrap"}}>{fmtD(t.start)} → {fmtD(t.end)}</span>
+            <span style={{fontSize:12,fontWeight:600,color:"#10B981"}}>{fmtC(t.budget)}</span>
+          </div>
+          <button onClick={()=>setTasks(p=>p.filter(x=>x.id!==t.id&&x.pid!==t.id))} style={{border:"none",background:"none",cursor:"pointer",color:"#F87171",fontSize:13,opacity:0.5,flexShrink:0}}>✕</button>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/* ═══ KANBAN VIEW (top-level) ═══════════════════════════ */
+function KanbanView(){
+  const {tasks,setTasks,currentUser,setCardId}=useCx();
+  const [kanbanCols,setKanbanCols]=useState(Object.keys(STATUS_CFG));
+  const [dragKId,setDragKId]=useState(null);
+  const [dropCol,setDropCol]=useState(null);
+  const moveCard=(taskId,newStatus)=>setTasks(p=>p.map(t=>t.id===taskId?{...t,status:newStatus}:t));
+  const addKCol=()=>{const n=prompt("New column name:");if(n&&!kanbanCols.includes(n))setKanbanCols(p=>[...p,n])};
+  const remKCol=s=>{if(tasks.some(t=>t.status===s)&&!confirm(`"${s}" has tasks. Remove column?`))return;setKanbanCols(p=>p.filter(x=>x!==s))};
+  return(
+    <div style={{display:"flex",flexDirection:"column",height:"100%",overflow:"hidden"}}>
+      <div style={{display:"flex",alignItems:"center",gap:8,padding:"8px 14px",background:"white",borderBottom:"1px solid #E2E8F0",flexShrink:0}}>
+        <span style={{fontSize:13,fontWeight:600,color:"#64748B"}}>Kanban Board</span>
+        <button onClick={addKCol} style={{fontSize:12,color:AC,border:`1px solid ${AC}`,background:"transparent",borderRadius:6,padding:"3px 10px",cursor:"pointer",fontWeight:600,marginLeft:"auto"}}>+ Add Column</button>
+      </div>
+      <div style={{flex:1,overflow:"auto",padding:"14px",display:"flex",gap:14,alignItems:"flex-start"}}>
+        {kanbanCols.map(status=>{
+          const cfg=STATUS_CFG[status]||{bg:"#F1F5F9",tx:"#475569",dot:"#94A3B8"};
+          const cards=tasks.filter(t=>t.status===status);
+          const isDropTarget=dropCol===status;
+          return(
+            <div key={status}
+              onDragOver={e=>{e.preventDefault();setDropCol(status)}}
+              onDrop={e=>{e.preventDefault();if(dragKId)moveCard(dragKId,status);setDragKId(null);setDropCol(null)}}
+              style={{width:270,flexShrink:0,background:isDropTarget?"#EEF2FF":"#F8FAFF",borderRadius:12,border:isDropTarget?`2px dashed ${AC}`:"2px solid #E2E8F0",minHeight:200,display:"flex",flexDirection:"column",transition:"all .15s"}}>
+              {/* Column header */}
+              <div style={{padding:"10px 12px",display:"flex",justifyContent:"space-between",alignItems:"center",borderBottom:"1px solid #E2E8F0"}}>
+                <div style={{display:"flex",alignItems:"center",gap:7}}>
+                  <span style={{width:8,height:8,borderRadius:"50%",background:cfg.dot,display:"inline-block"}}/>
+                  <span style={{fontWeight:700,fontSize:13,color:"#1E293B"}}>{status}</span>
+                  <span style={{fontSize:11,background:cfg.bg,color:cfg.tx,borderRadius:999,padding:"1px 7px",fontWeight:600}}>{cards.length}</span>
+                </div>
+                {!Object.keys(STATUS_CFG).includes(status)&&<button onClick={()=>remKCol(status)} style={{border:"none",background:"none",cursor:"pointer",color:"#F87171",fontSize:12}}>✕</button>}
+              </div>
+              {/* Cards */}
+              <div style={{padding:"8px",flex:1,display:"flex",flexDirection:"column",gap:8}}>
+                {cards.map(t=>(
+                  <div key={t.id}
+                    draggable
+                    onDragStart={()=>setDragKId(t.id)}
+                    onDragEnd={()=>{setDragKId(null);setDropCol(null)}}
+                    onClick={()=>setCardId(t.id)} style={{background:"white",borderRadius:9,padding:"10px 12px",boxShadow:"0 1px 4px rgba(0,0,0,0.08)",border:"1px solid #F1F5F9",cursor:"grab",opacity:dragKId===t.id?0.4:1,transition:"transform .1s"}}>
+                    <div style={{fontSize:13,fontWeight:600,color:"#1E293B",marginBottom:6,lineHeight:1.3}}>{t.name}</div>
+                    <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:8}}>
+                      <PBadge p={t.prio}/>
+                      {t.asn&&<span style={{display:"inline-flex",alignItems:"center",gap:4}}><Ava name={t.asn} size={16}/><span style={{fontSize:11,color:"#64748B"}}>{t.asn}</span></span>}
+                    </div>
+                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                      <PBar v={t.prog}/>
+                      <span style={{fontSize:11,color:"#94A3B8",flexShrink:0,marginLeft:8}}>{fmtD(t.end)}</span>
+                    </div>
+                    {t.pred&&<div style={{fontSize:10,color:"#94A3B8",marginTop:5}}>Pred: {t.pred}</div>}
+                  </div>
+                ))}
+                {/* Drop zone */}
+                {isDropTarget&&<div style={{border:"2px dashed #C7D2FE",borderRadius:8,padding:"12px",textAlign:"center",fontSize:12,color:AC,fontWeight:600}}>Drop here</div>}
+              </div>
+              {/* Add card at bottom */}
+              <div style={{padding:"6px 8px",borderTop:"1px solid #F1F5F9"}}>
+                <button onClick={()=>setTasks(p=>[...p,{id:uid(),wbs:String(p.filter(t=>t.level===0).length+1),name:"New Task",level:0,par:false,pid:null,start:today,end:today,dur:1,prog:0,status,prio:"Medium",asn:currentUser?.name||"",ownerId:currentUser?.id||"",budget:0,spent:0,pred:"",notes:"",desc:"",subtasks:[],comments:[]}])} style={{width:"100%",fontSize:12,color:"#94A3B8",border:"1px dashed #E2E8F0",background:"transparent",cursor:"pointer",borderRadius:6,padding:"5px 0",fontFamily:"inherit"}}
+                  onMouseEnter={e=>{e.currentTarget.style.color=AC;e.currentTarget.style.borderColor=AC}}
+                  onMouseLeave={e=>{e.currentTarget.style.color="#94A3B8";e.currentTarget.style.borderColor="#E2E8F0"}}>
+                  + Add card
+                </button>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+/* ═══ SIDEBAR (top-level) ═══════════════════════════════ */
+function Sidebar(){
+  const {view,setView,currentUser,projects,activeProjectId,openProject,createProject,deleteProject,stats}=useCx();
+  const navItems=[{id:"dashboard",label:"Dashboard"},{id:"sheet",label:"Sheet View"},{id:"gantt",label:"Gantt Chart"},{id:"wbs",label:"WBS Structure"},{id:"kanban",label:"Kanban Board"}];
+  return(
+    <nav style={{width:220,background:"linear-gradient(180deg,#0F1629 0%,#1A2044 100%)",color:"white",display:"flex",flexDirection:"column",flexShrink:0,boxShadow:"4px 0 24px rgba(0,0,0,0.25)",paddingTop:10}}>
+      {/* Project switcher */}
+      <div style={{padding:"10px 12px",borderBottom:"1px solid rgba(255,255,255,0.07)"}}>
+        <div style={{color:"rgba(255,255,255,0.35)",fontSize:9,fontWeight:700,letterSpacing:"0.1em",textTransform:"uppercase",marginBottom:6}}>Projects</div>
+        {projects.slice(0,8).map(p=>(
+          <div key={p.id} style={{display:"flex",alignItems:"center",gap:6,padding:"5px 7px",borderRadius:7,marginBottom:2,background:p.id===activeProjectId?"rgba(99,102,241,0.3)":"transparent",color:p.id===activeProjectId?"#A5B4FC":"rgba(255,255,255,0.65)",fontSize:12,fontWeight:p.id===activeProjectId?600:400}}>
+            <span onClick={()=>openProject(p.id)} style={{overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",cursor:"pointer",flex:1}}>{p.name}</span>
+            <button onClick={(e)=>{e.stopPropagation();deleteProject(p.id)}} title="Delete project" style={{border:"none",background:"transparent",color:"rgba(255,255,255,0.45)",cursor:"pointer",fontSize:12,padding:"0 3px"}}>Delete</button>
+          </div>
+        ))}
+        <button onClick={async ()=>{const n=prompt("New project name:");if(n)await createProject(n)}} style={{width:"100%",background:"rgba(255,255,255,0.06)",border:"1px dashed rgba(255,255,255,0.2)",borderRadius:6,padding:"4px 0",color:"rgba(255,255,255,0.4)",fontSize:11,cursor:"pointer",fontFamily:"inherit",marginTop:4}}>+ New Project</button>
+      </div>
+      {/* Nav */}
+      <div style={{padding:"8px 8px",flex:1}}>
+        {navItems.map(({id,label})=>(
+          <div key={id} onClick={()=>setView(id)} style={{display:"flex",alignItems:"center",gap:9,padding:"8px 10px",borderRadius:8,cursor:"pointer",marginBottom:2,userSelect:"none",background:view===id?"rgba(99,102,241,0.25)":"transparent",color:view===id?"#A5B4FC":"rgba(255,255,255,0.65)",fontWeight:view===id?600:400,fontSize:13}}>
+            {label}
+            {view===id&&<span style={{marginLeft:"auto",width:5,height:5,borderRadius:"50%",background:"#818CF8",flexShrink:0,display:"inline-block"}}/>}
+          </div>
+        ))}
+      </div>
+      {/* Stats */}
+      <div style={{padding:"10px 14px",borderTop:"1px solid rgba(255,255,255,0.07)"}}>
+        {[{l:"Tasks",v:stats.total,c:"rgba(255,255,255,0.8)"},{l:"Completed",v:stats.done,c:"#34D399"},{l:"In Progress",v:stats.inProg,c:"#60A5FA"},{l:"Overall",v:stats.avgProg+"%",c:"#A5B4FC"}].map(({l,v,c})=>(
+          <div key={l} style={{display:"flex",justifyContent:"space-between",marginBottom:4}}>
+            <span style={{color:"rgba(255,255,255,0.4)",fontSize:11}}>{l}</span>
+            <span style={{color:c,fontSize:11,fontWeight:700}}>{v}</span>
+          </div>
+        ))}
+        <div style={{marginTop:6,height:3,background:"rgba(255,255,255,0.1)",borderRadius:999}}><div style={{width:stats.avgProg+"%",height:"100%",background:"#818CF8",borderRadius:999}}/></div>
+      </div>
+    </nav>
+  );
+}
+
+/* ═══ USER DROPDOWN ════════════════════════════════════ */
+function UserDropdown(){
+  const {currentUser,setCurrentUser,tasks,projName,columns,taskStyles,setShowUserMgr,setShowColMgr,setShowExe}=useCx();
+  const [open,setOpen]=useState(false);
+  const ref=useRef(null);
+  useEffect(()=>{const h=e=>{if(ref.current&&!ref.current.contains(e.target))setOpen(false)};document.addEventListener("mousedown",h);return()=>document.removeEventListener("mousedown",h)},[]);
+
+  const doCSV=()=>{const h=["WBS","Task","Assignee","Start","End","Days","Pred","% Done","Status","Priority","Budget","Actual","Notes"];const r=tasks.map(t=>[t.wbs,t.name,t.asn,t.start,t.end,t.dur,t.pred,t.prog,t.status,t.prio,t.budget,t.spent,t.notes]);const csv=[h,...r].map(row=>row.map(c=>`"${c??""}"` ).join(",")).join("\n");const a=document.createElement("a");a.href="data:text/csv;charset=utf-8,"+encodeURIComponent(csv);a.download=projName+".csv";a.click()};
+  const doXLSX=()=>{const ws=XLSX.utils.json_to_sheet(tasks.map(t=>({"WBS":t.wbs,"Task Name":t.name,"Assignee":t.asn,"Start":t.start,"Finish":t.end,"Days":t.dur,"Predecessors":t.pred,"% Done":t.prog,"Status":t.status,"Priority":t.prio,"Budget":t.budget,"Actual":t.spent,"Notes":t.notes})));const wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,ws,"Tasks");XLSX.writeFile(wb,projName+".xlsx")};
+  const doHTMLXLS=()=>{
+    const visCols=columns.filter(c=>c.visible);
+    const statusColors={"Completed":"#DCFCE7","In Progress":"#DBEAFE","Not Started":"#F1F5F9","On Hold":"#FEF9C3","Blocked":"#FFE4E6"};
+    const prioColors={"Low":"#DCFCE7","Medium":"#FEF9C3","High":"#FFE4E6","Critical":"#F3E8FF"};
+    let html=`<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:x="urn:schemas-microsoft-com:office:excel"><head><meta charset="UTF-8"/><style>td,th{border:1px solid #E2E8F0;padding:6px 10px;font-size:12px;font-family:Calibri,sans-serif}th{background:#1A2044;color:white;font-weight:bold}tr:nth-child(even) td{background:#F8FAFF}</style></head><body><table>`;
+    html+=`<tr>${visCols.map(c=>`<th>${c.label}</th>`).join("")}</tr>`;
+    tasks.forEach(t=>{
+      const sty=taskStyles[t.id]||{};
+      html+=`<tr style="background:${sty.rowBg||''};font-weight:${sty.bold?"bold":"normal"};color:${sty.txColor||""}">`;
+      visCols.forEach(c=>{
+        let v=t[c.field]??"";let cs="";
+        if(c.type==="currency")v="$"+Number(v||0).toLocaleString();
+        if(c.field==="status"&&statusColors[v])cs=`background:${statusColors[v]};`;
+        if(c.field==="prio"&&prioColors[v])cs=`background:${prioColors[v]};`;
+        if(c.type==="progress")v=v+"%";
+        html+=`<td style="${cs}">${v}</td>`;
+      });
+      html+="</tr>";
+    });
+    html+="</table></body></html>";
+    const blob=new Blob([html],{type:"application/vnd.ms-excel"});
+    const url=URL.createObjectURL(blob);const a=document.createElement("a");a.href=url;a.download=projName+"_formatted.xls";a.click();URL.revokeObjectURL(url);
+  };
+  const doJSON=()=>{const a=document.createElement("a");a.href="data:application/json;charset=utf-8,"+encodeURIComponent(JSON.stringify({project:projName,exported:new Date().toISOString(),tasks},null,2));a.download=projName+".json";a.click()};
+
+  const items=[
+    {label:"My Profile",action:()=>{alert(`Name: ${currentUser?.name}\nEmail: ${currentUser?.email}\nRole: ${currentUser?.role}`)}},
+    {label:"Team Members",action:()=>{setShowUserMgr(true);setOpen(false)}},
+    {label:"Column Settings",action:()=>{setShowColMgr(true);setOpen(false)}},
+    {sep:true},
+    {label:"Export — Excel (formatted)",action:()=>{doHTMLXLS();setOpen(false)}},
+    {label:"Export — XLSX (raw)",action:()=>{doXLSX();setOpen(false)}},
+    {label:"Export — CSV",action:()=>{doCSV();setOpen(false)}},
+    {label:"Export — JSON",action:()=>{doJSON();setOpen(false)}},
+    {label:"Print / PDF",action:()=>{window.print();setOpen(false)}},
+    {sep:true},
+    {label:"Convert to Desktop App",action:()=>{setShowExe(true);setOpen(false)}},
+    {sep:true},
+    {label:"Logout",action:()=>{setCurrentUser(null);saveLS(CU_KEY,null);setOpen(false)},danger:true},
+  ];
+
+  return(
+    <div ref={ref} style={{position:"relative",flexShrink:0}}>
+      <button onClick={()=>setOpen(!open)} style={{display:"flex",alignItems:"center",gap:8,background:open?"#F0F4FF":"#F8FAFF",border:"1px solid #E2E8F0",borderRadius:8,padding:"6px 12px",cursor:"pointer",fontFamily:"inherit"}}>
+        <div style={{width:26,height:26,borderRadius:"50%",background:currentUser?.color||AC,display:"flex",alignItems:"center",justifyContent:"center",fontSize:10,fontWeight:700,color:"white"}}>{currentUser?.initials||"?"}</div>
+        <span style={{fontSize:13,fontWeight:600,color:"#1E293B"}}>{currentUser?.name||"User"}</span>
+        <span style={{fontSize:10,color:"#94A3B8"}}>{open?"":""}</span>
+      </button>
+      {open&&(
+        <div style={{position:"absolute",top:"calc(100% + 6px)",right:0,background:"white",borderRadius:12,boxShadow:"0 8px 40px rgba(0,0,0,0.18)",border:"1px solid #E2E8F0",minWidth:240,zIndex:200,overflow:"hidden"}}>
+          <div style={{padding:"10px 14px",borderBottom:"1px solid #F1F5F9",background:"#F8FAFF"}}>
+            <div style={{fontSize:13,fontWeight:700,color:"#1E293B"}}>{currentUser?.name}</div>
+            <div style={{fontSize:11,color:"#94A3B8"}}>{currentUser?.email}</div>
+          </div>
+          {items.map((item,i)=>item.sep?<div key={i} style={{height:1,background:"#F1F5F9",margin:"3px 0"}}/>:(
+            <div key={i} onClick={item.action} style={{display:"flex",alignItems:"center",gap:10,padding:"9px 14px",cursor:"pointer",color:item.danger?"#EF4444":"#374151",fontSize:13}}
+              onMouseEnter={e=>e.currentTarget.style.background=item.danger?"#FFF1F2":"#F8FAFF"}
+              onMouseLeave={e=>e.currentTarget.style.background="transparent"}>
+              <span style={{fontSize:14,width:20}}>{item.icon}</span>{item.label}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ═══ LOGIN SCREEN (top-level) ═══════════════════════════ */
+function LoginScreen(){
+  const {setUsers,setCurrentUser}=useCx();
+  const [mode,setMode]=useState("login");
+  const [name,setName]=useState("Douglas F.");
+  const [email,setEmail]=useState("admin@pmhub.com");
+  const [pwd,setPwd]=useState("admin123");
+  const [err,setErr]=useState("");
+
+  const login=async ()=>{
+    setErr("");
+    try{
+      const data=await apiSend("/api/login","POST",{email,password:pwd});
+      const u=data.user;
+      if(!u){setErr("Invalid email or password");return}
+      setCurrentUser(u);saveLS(CU_KEY,u);
+    }catch(e){
+      setErr("Invalid email or password");
+    }
+  };
+
+  const createAccount=async ()=>{
+    setErr("");
+    if(!name.trim()||!email.trim()||!pwd.trim()){setErr("Name, email, and password are required");return}
+    try{
+      const u=await apiSend("/api/users","POST",{name,email,password:pwd,role:"Editor"});
+      const users=await apiGet("/api/users");
+      setUsers(users);saveLS(USERS_KEY,users);
+      setCurrentUser(u);saveLS(CU_KEY,u);
+    }catch(e){
+      setErr("Could not create account. That email may already exist.");
+    }
+  };
+
+  return(
+    <div style={{height:"100vh",display:"flex",alignItems:"center",justifyContent:"center",background:"linear-gradient(135deg,#0F1629 0%,#1A2044 60%,#2D1B69 100%)"}}>
+      <div style={{background:"white",borderRadius:20,padding:"36px 40px",width:380,boxShadow:"0 32px 100px rgba(0,0,0,0.4)"}}>
+        <div style={{textAlign:"center",marginBottom:24}}>
+          <h1 style={{fontSize:22,fontWeight:800,color:"#1E293B",margin:0}}>Project Management Hub</h1>
+          <p style={{color:"#94A3B8",fontSize:13,margin:"6px 0 0"}}>{mode==="login"?"Sign in to your workspace":"Create your workspace account"}</p>
+        </div>
+        {err&&<div style={{background:"#FFF1F2",border:"1px solid #FECDD3",borderRadius:8,padding:"8px 12px",fontSize:13,color:"#BE123C",marginBottom:14}}>{err}</div>}
+        {mode==="signup"&&(
+          <div style={{marginBottom:14}}>
+            <label style={{display:"block",fontSize:11,fontWeight:700,color:"#64748B",textTransform:"uppercase",letterSpacing:"0.06em",marginBottom:5}}>Name</label>
+            <input value={name} onChange={e=>setName(e.target.value)} style={{width:"100%",padding:"10px 12px",border:"1.5px solid #E2E8F0",borderRadius:9,fontSize:14,fontFamily:"inherit",outline:"none",boxSizing:"border-box"}}/>
+          </div>
+        )}
+        <div style={{marginBottom:14}}>
+          <label style={{display:"block",fontSize:11,fontWeight:700,color:"#64748B",textTransform:"uppercase",letterSpacing:"0.06em",marginBottom:5}}>Email</label>
+          <input type="email" value={email} onChange={e=>setEmail(e.target.value)} onKeyDown={e=>e.key==="Enter"&&(mode==="login"?login():createAccount())} style={{width:"100%",padding:"10px 12px",border:"1.5px solid #E2E8F0",borderRadius:9,fontSize:14,fontFamily:"inherit",outline:"none",boxSizing:"border-box"}}/>
+        </div>
+        <div style={{marginBottom:14}}>
+          <label style={{display:"block",fontSize:11,fontWeight:700,color:"#64748B",textTransform:"uppercase",letterSpacing:"0.06em",marginBottom:5}}>Password</label>
+          <input type="password" value={pwd} onChange={e=>setPwd(e.target.value)} onKeyDown={e=>e.key==="Enter"&&(mode==="login"?login():createAccount())} style={{width:"100%",padding:"10px 12px",border:"1.5px solid #E2E8F0",borderRadius:9,fontSize:14,fontFamily:"inherit",outline:"none",boxSizing:"border-box"}}/>
+        </div>
+        <button onClick={mode==="login"?login:createAccount} style={{width:"100%",background:"linear-gradient(135deg,#6366F1,#818CF8)",color:"white",border:"none",borderRadius:10,padding:"12px",fontSize:15,fontWeight:700,cursor:"pointer",fontFamily:"inherit",marginTop:4}}>{mode==="login"?"Sign In":"Create Account"}</button>
+        <button onClick={()=>{setMode(mode==="login"?"signup":"login");setErr("")}} style={{width:"100%",background:"transparent",color:"#6366F1",border:"none",padding:"12px 0 0",fontSize:13,fontWeight:700,cursor:"pointer",fontFamily:"inherit"}}>
+          {mode==="login"?"Create an account":"Back to sign in"}
+        </button>
+        {mode==="login"&&<div style={{textAlign:"center",marginTop:14,fontSize:12,color:"#94A3B8"}}>Default: admin@pmhub.com / admin123</div>}
+      </div>
+    </div>
+  );
+}
+
+/* ═══ APP ════════════════════════════════════════════════ */
+function App(){
+  /* ── Auth ───────────────────────────── */
+  const [users,setUsers]      = useState(()=>loadLS(USERS_KEY)||DEF_USERS);
+  const [currentUser,setCurrentUser]=useState(()=>{const u=loadLS(CU_KEY);return u&&(loadLS(USERS_KEY)||DEF_USERS).find(x=>x.id===u.id)?u:null});
+
+  /* ── Projects ───────────────────────── */
+  const [projects,setProjects]= useState(()=>{
+    let idx=loadLS(IDX_KEY)||[];
+    if(idx.length===0){const id=uid(),now=new Date().toISOString();idx=[{id,name:"Q3 Digital Platform Launch",taskCount:DEF_TASKS.length,createdAt:now,updatedAt:now}];saveLS(IDX_KEY,idx);saveLS(PK(id),{name:idx[0].name,tasks:DEF_TASKS});}
+    return idx;
+  });
+  const [activeProjectId,setActiveProjectId]=useState(()=>loadLS(ACTIVE_KEY)||(loadLS(IDX_KEY)||[{id:null}])[0]?.id);
+
+  /* ── Working state ──────────────────── */
+  const [tasks,setTasks]      = useState(()=>{const d=loadLS(PK(loadLS(ACTIVE_KEY)||(loadLS(IDX_KEY)||[{}])[0]?.id));return d?.tasks||DEF_TASKS});
+  const [projName,setProjName]= useState(()=>{const d=loadLS(PK(loadLS(ACTIVE_KEY)||(loadLS(IDX_KEY)||[{}])[0]?.id));return d?.name||"My Project"});
+  const [columns,setColumns]  = useState(()=>loadLS("pmhub2_cols")||DEF_COLS);
+  const [taskStyles,setTaskStyles]=useState({});
+  const [view,setView]        = useState("sheet");
+  const [q,setQ]              = useState("");
+  const [statusFilter,setStatusFilter]=useState("all");
+  const [sort,setSort]        = useState({f:"",d:"asc"});
+  const [editing,setEditing]  = useState(null);
+  const [editVal,setEditVal]  = useState("");
+  const [collapsed,setCollapsed]=useState(new Set());
+  const [cardId,setCardId]    = useState(null);
+  const [saveStatus,setSaveStatus]=useState("saved");
+
+  /* ── Modals ─────────────────────────── */
+  const [showUserMgr,setShowUserMgr]=useState(false);
+  const [showColMgr,setShowColMgr]=useState(false);
+  const [showExe,setShowExe]  = useState(false);
+
+  /* ── Save columns ───────────────────── */
+  useEffect(()=>saveLS("pmhub2_cols",columns),[columns]);
+
+  /* ── Auto-save project locally and to Node backend ───── */
+  useEffect(()=>{
+    if(!activeProjectId)return;
+    setSaveStatus("unsaved");
+    const t=setTimeout(async ()=>{
+      setSaveStatus("saving");
+      const now=new Date().toISOString();
+      const savedProjects=loadLS(IDX_KEY)||projects||[];
+      const upd=savedProjects.map(p=>p.id===activeProjectId?{...p,name:projName,taskCount:tasks.length,updatedAt:now}:p);
+      saveLS(PK(activeProjectId),{name:projName,tasks});
+      saveLS(IDX_KEY,upd);
+      setProjects(upd);
+      try{
+        await apiSend(`/api/projects/${activeProjectId}`,"PUT",{name:projName,tasks});
+      }catch(err){
+        console.warn("Backend autosave failed, local copy still saved",err);
+      }
+      setSaveStatus("saved");
+    },700);
+    return()=>clearTimeout(t);
+  },[tasks,projName,activeProjectId]);
+
+  /* ── Load projects from Node backend on startup ───────── */
+  useEffect(()=>{
+    let cancelled=false;
+    (async()=>{
+      try{
+        const backendProjects=await apiGet("/api/projects");
+        if(cancelled||!Array.isArray(backendProjects)||backendProjects.length===0)return;
+        saveLS(IDX_KEY,backendProjects);
+        setProjects(backendProjects);
+        const wanted=backendProjects.find(p=>p.id===activeProjectId)?.id || backendProjects[0].id;
+        const full=await apiGet(`/api/projects/${wanted}`);
+        if(cancelled)return;
+        saveLS(ACTIVE_KEY,wanted);
+        saveLS(PK(wanted),{name:full.name,tasks:full.tasks||[]});
+        setActiveProjectId(wanted);
+        setProjName(full.name||"Untitled");
+        setTasks(full.tasks||[]);
+        setSaveStatus("saved");
+      }catch(err){
+        console.warn("Backend load failed, using local browser copy",err);
+      }
+    })();
+    return()=>{cancelled=true};
+  },[]);
+
+  /* ── Load team users from backend ───── */
+  useEffect(()=>{
+    let cancelled=false;
+    (async()=>{
+      try{
+        const backendUsers=await apiGet("/api/users");
+        if(cancelled||!Array.isArray(backendUsers)||backendUsers.length===0)return;
+        setUsers(backendUsers);
+        saveLS(USERS_KEY,backendUsers);
+      }catch(err){
+        console.warn("Backend users load failed, using local users",err);
+      }
+    })();
+    return()=>{cancelled=true};
+  },[]);
+
+  /* ── Team sync polling for shared online workspace ───── */
+  useEffect(()=>{
+    if(!activeProjectId||!currentUser)return;
+    const timer=setInterval(async()=>{
+      try{
+        const full=await apiGet(`/api/projects/${activeProjectId}`);
+        const local=JSON.stringify(tasks);
+        const remote=JSON.stringify(full.tasks||[]);
+        if(remote!==local && saveStatus==="saved"){
+          setProjName(full.name||"Untitled");
+          setTasks(full.tasks||[]);
+          saveLS(PK(activeProjectId),{name:full.name,tasks:full.tasks||[]});
+        }
+      }catch(err){}
+    },5000);
+    return()=>clearInterval(timer);
+  },[activeProjectId,currentUser,saveStatus,tasks]);
+
+  /* ── Project operations ─────────────── */
+  const openProject=useCallback(async id=>{
+    if(activeProjectId){
+      saveLS(PK(activeProjectId),{name:projName,tasks});
+      try{await apiSend(`/api/projects/${activeProjectId}`,"PUT",{name:projName,tasks});}catch(err){console.warn("Could not save current project before switching",err);}
+    }
+    let d=loadLS(PK(id))||{name:"",tasks:[]};
+    try{
+      const fromBackend=await apiGet(`/api/projects/${id}`);
+      d={name:fromBackend.name,tasks:fromBackend.tasks||[]};
+      saveLS(PK(id),d);
+    }catch(err){
+      console.warn("Backend project load failed, using local browser copy",err);
+    }
+    setActiveProjectId(id);saveLS(ACTIVE_KEY,id);
+    setProjName(d.name||"Untitled");setTasks(d.tasks||[]);
+    setEditing(null);setQ("");setStatusFilter("all");setSaveStatus("saved");
+  },[activeProjectId,projName,tasks]);
+
+  const createProject=useCallback(async name=>{
+    if(activeProjectId){
+      saveLS(PK(activeProjectId),{name:projName,tasks});
+      try{await apiSend(`/api/projects/${activeProjectId}`,"PUT",{name:projName,tasks});}catch(err){console.warn("Could not save current project before creating new one",err);}
+    }
+    const now=new Date().toISOString();
+    let meta;
+    try{
+      meta=await apiSend("/api/projects","POST",{name:name||"New Project",tasks:[]});
+    }catch(err){
+      console.warn("Backend project create failed, creating local project only",err);
+      meta={id:uid(),name:name||"New Project",taskCount:0,createdAt:now,updatedAt:now};
+    }
+    const idx=[meta,...(loadLS(IDX_KEY)||[]).filter(p=>p.id!==meta.id)];
+    saveLS(IDX_KEY,idx);saveLS(PK(meta.id),{name:meta.name,tasks:[]});saveLS(ACTIVE_KEY,meta.id);
+    setProjects(idx);setActiveProjectId(meta.id);setProjName(meta.name);setTasks([]);setSaveStatus("saved");
+    return meta;
+  },[activeProjectId,projName,tasks]);
+
+  const deleteProject=useCallback(async id=>{
+    if(!id)return;
+    const target=projects.find(p=>p.id===id);
+    if(!confirm(`Delete "${target?.name||"this project"}"? This cannot be undone.`))return;
+    try{await fetch(`/api/projects/${id}`,{method:"DELETE"});}catch(err){console.warn("Backend delete failed, removing local copy only",err);}
+    const nextProjects=(loadLS(IDX_KEY)||projects).filter(p=>p.id!==id);
+    localStorage.removeItem(PK(id));
+    saveLS(IDX_KEY,nextProjects);
+    setProjects(nextProjects);
+    if(id===activeProjectId){
+      const next=nextProjects[0];
+      if(next){
+        saveLS(ACTIVE_KEY,next.id);
+        setActiveProjectId(next.id);
+        try{
+          const full=await apiGet(`/api/projects/${next.id}`);
+          setProjName(full.name||next.name||"Untitled");
+          setTasks(full.tasks||[]);
+          saveLS(PK(next.id),{name:full.name||next.name,tasks:full.tasks||[]});
+        }catch(err){
+          const d=loadLS(PK(next.id))||{name:next.name,tasks:[]};
+          setProjName(d.name||next.name||"Untitled");
+          setTasks(d.tasks||[]);
+        }
+      }else{
+        const meta=await createProject("New Team Project");
+        setActiveProjectId(meta.id);
+      }
+    }
+  },[projects,activeProjectId,createProject]);
+
+  /* ── Stats ──────────────────────────── */
+  const stats=useMemo(()=>({
+    total:tasks.length,
+    done:tasks.filter(t=>t.status==="Completed").length,
+    inProg:tasks.filter(t=>t.status==="In Progress").length,
+    blocked:tasks.filter(t=>t.status==="Blocked").length,
+    budget:tasks.filter(t=>t.level===0).reduce((s,t)=>s+(t.budget||0),0),
+    spent:tasks.filter(t=>t.level===0).reduce((s,t)=>s+(t.spent||0),0),
+    avgProg:tasks.length?Math.round(tasks.reduce((s,t)=>s+(t.prog||0),0)/tasks.length):0,
+  }),[tasks]);
+
+  const saveColor=saveStatus==="saved"?"#22C55E":saveStatus==="saving"?"#F59E0B":"#94A3B8";
+  const saveLabel=saveStatus==="saved"?" Saved":saveStatus==="saving"?"Saving…":"● Unsaved";
+
+  const ctxVal={
+    users,setUsers,currentUser,setCurrentUser,
+    projects,setProjects,activeProjectId,openProject,createProject,deleteProject,
+    tasks,setTasks,projName,setProjName,
+    columns,setColumns,taskStyles,setTaskStyles,
+    view,setView,q,setQ,statusFilter,setStatusFilter,sort,setSort,
+    editing,setEditing,editVal,setEditVal,
+    collapsed,setCollapsed,
+    cardId,setCardId,stats,
+    showUserMgr,setShowUserMgr,showColMgr,setShowColMgr,showExe,setShowExe,
+  };
+
+  if(!currentUser) return <Ctx.Provider value={ctxVal}><LoginScreen/></Ctx.Provider>;
+
+  return(
+    <Ctx.Provider value={ctxVal}>
+      <div style={{display:"flex",height:"100vh",fontFamily:"'Plus Jakarta Sans',system-ui,sans-serif",overflow:"hidden",position:"relative"}}>
+        <Sidebar/>
+        <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden",minWidth:0}}>
+          {/* Header */}
+          <div style={{background:"white",borderBottom:"1px solid #E2E8F0",height:52,display:"flex",alignItems:"center",padding:"0 18px",gap:12,flexShrink:0}}>
+            <input value={projName} onChange={e=>setProjName(e.target.value)} style={{border:"none",outline:"none",fontSize:16,fontWeight:800,color:"#1E293B",background:"transparent",fontFamily:"inherit",flex:1,minWidth:0}}/>
+            <span style={{fontSize:11,fontWeight:600,color:saveColor,flexShrink:0}}>{saveLabel}</span>
+            <div style={{width:1,height:20,background:"#E2E8F0"}}/>
+            <UserDropdown/>
+          </div>
+          {/* Stats strip */}
+          {view!=="dashboard"&&(
+            <div style={{display:"flex",gap:10,padding:"8px 18px",background:"#F8FAFF",borderBottom:"1px solid #E2E8F0",flexShrink:0,overflowX:"auto"}}>
+              {[{l:"Tasks",v:stats.total,c:"#6366F1"},{l:"Completed",v:stats.done,c:"#16A34A"},{l:"In Progress",v:stats.inProg,c:"#2563EB"},{l:"Blocked",v:stats.blocked,c:"#BE123C"},{l:"Overall",v:stats.avgProg+"%",c:"#6366F1"},{l:"Budget",v:fmtC(stats.budget),c:"#059669"},{l:"Spent",v:fmtC(stats.spent),c:"#D97706"},{l:"Remaining",v:fmtC(stats.budget-stats.spent),c:stats.budget-stats.spent<0?"#BE123C":"#6366F1"}].map(({l,v,c})=>(
+                <div key={l} style={{background:"white",border:"1px solid #E2E8F0",borderRadius:9,padding:"6px 12px",flexShrink:0}}>
+                  <div style={{fontSize:9,color:"#94A3B8",fontWeight:700,textTransform:"uppercase",letterSpacing:"0.06em",marginBottom:2}}>{l}</div>
+                  <div style={{fontSize:16,fontWeight:800,color:c}}>{v}</div>
+                </div>
+              ))}
+            </div>
+          )}
+          {/* Toolbar */}
+          {(view==="sheet"||view==="kanban")&&(
+            <div style={{display:"flex",gap:8,padding:"6px 18px",background:"white",borderBottom:"1px solid #E2E8F0",flexShrink:0,alignItems:"center"}}>
+              <div style={{position:"relative",flex:1,maxWidth:200}}>
+                <span style={{position:"absolute",left:8,top:"50%",transform:"translateY(-50%)",color:"#94A3B8",fontSize:13}}></span>
+                <input value={q} onChange={e=>setQ(e.target.value)} placeholder="Search…" style={{width:"100%",paddingLeft:24,height:30,border:"1px solid #E2E8F0",borderRadius:7,fontSize:12,outline:"none",fontFamily:"inherit",boxSizing:"border-box",color:"#374151"}}/>
+                {q&&<button onClick={()=>setQ("")} style={{position:"absolute",right:6,top:"50%",transform:"translateY(-50%)",border:"none",background:"none",cursor:"pointer",color:"#94A3B8",fontSize:14,padding:0}}></button>}
+              </div>
+              <select value={statusFilter} onChange={e=>setStatusFilter(e.target.value)} style={{height:30,border:"1px solid #E2E8F0",borderRadius:7,fontSize:12,padding:"0 8px",outline:"none",fontFamily:"inherit",color:"#475569",cursor:"pointer"}}>
+                <option value="all">All Statuses</option>
+                {Object.keys(STATUS_CFG).map(s=><option key={s}>{s}</option>)}
+              </select>
+              {view==="sheet"&&<button onClick={()=>setShowColMgr(true)} style={{height:30,border:"1px solid #E2E8F0",borderRadius:7,fontSize:12,padding:"0 10px",background:"white",color:"#6366F1",cursor:"pointer",fontFamily:"inherit",fontWeight:600}}> Columns</button>}
+              <button onClick={()=>{setQ("");setStatusFilter("all");setSort({f:"",d:"asc"})}} style={{height:30,border:"1px solid #E2E8F0",borderRadius:7,fontSize:12,padding:"0 10px",background:"white",color:"#94A3B8",cursor:"pointer",fontFamily:"inherit"}}>↺</button>
+            </div>
+          )}
+          {/* Views */}
+          <div style={{flex:1,overflow:"hidden",position:"relative",background:view==="dashboard"?"#F8FAFF":"white"}}>
+            {view==="dashboard"&&<Dashboard/>}
+            {view==="sheet"   &&<SheetView/>}
+            {view==="gantt"   &&<GanttView/>}
+            {view==="wbs"     &&<WBSView/>}
+            {view==="kanban"  &&<KanbanView/>}
+          </div>
+        </div>
+
+        {/* Modals & panels */}
+        {cardId      &&<TaskCard/>}
+        {showColMgr  &&<ColMgr/>}
+        {showUserMgr &&<UserMgr/>}
+        {showExe     &&<ExeModal/>}
+      </div>
+    </Ctx.Provider>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+</script>
+</body>
+</html>
