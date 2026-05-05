@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: pmhub
+    env: node
+    plan: starter
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DATA_DIR
+        value: /var/data
+
+# IMPORTANT:
+# In Render, attach a persistent disk to this web service.
+# Mount path: /var/data
+# Without a persistent disk, data may reset after redeploys/restarts.
